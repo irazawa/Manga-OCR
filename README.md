@@ -291,7 +291,7 @@ TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
 
 ## Video Demo & Examples
 
-(https://youtu.be/SImZYo-nxvk)
+[![Tonton Video]](https://youtu.be/SImZYo-nxvk)
 
 ---
 
