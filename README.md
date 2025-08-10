@@ -291,15 +291,7 @@ TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
 
 ## Video Demo & Examples
 
-> Ganti placeholder URL dengan link video dan gambar hasil yang sebenarnya.
-
-| Tipe                |                                           Deskripsi | URL / Path                      |
-| ------------------- | --------------------------------------------------: | ------------------------------- |
-| Video Demo          | Demonstrasi fitur utama (OCR → Translate → Typeset) | `VIDEO_DEMO_URL`                |
-| Example Image 1     |                         Halaman manga asli (Jepang) | `examples/original_page_01.png` |
-| OCR Result 1        |                    Output hasil OCR sebelum koreksi | `examples/ocr_output_01.txt`    |
-| Translated Result 1 |        Hasil terjemahan (DeepL + Gemini correction) | `examples/translated_01.txt`    |
-| Typeset Result 1    |                        Gambar akhir setelah typeset | `examples/result_01.png`        |
+(https://youtu.be/SImZYo-nxvk)
 
 ---
 
