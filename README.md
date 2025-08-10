@@ -384,5 +384,3 @@ Silakan buka issue atau pull request. Ikuti kode gaya Python (PEP8) dan tambahka
 5. Refactoring Worker Threads: Logika worker dipisahkan menjadi OCRWorker dan TranslateWorker untuk alur kerja yang lebih bersih dan modular.
 
 ---
-
-Jika Anda ingin, saya dapat menambahkan contoh `config.ini` yang terisi lengkap, contoh video demo markdown embed, atau membuat file `examples/README` berisi gambar dan hasil yang bisa langsung ditunjukkan di repo.
