@@ -1,0 +1,3 @@
+git rm -r --cached "List Manga/"
+git rm --cached "old version config.ini"
+git commit -m "Remove ignored files"
