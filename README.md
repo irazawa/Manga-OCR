@@ -301,8 +301,6 @@ TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
 | Translated Result 1 |        Hasil terjemahan (DeepL + Gemini correction) | `examples/translated_01.txt`    |
 | Typeset Result 1    |                        Gambar akhir setelah typeset | `examples/result_01.png`        |
 
-> Catatan: Anda bisa menaruh contoh gambar di folder `examples/` di repo untuk kemudahan referensi.
-
 ---
 
 ## Developer Notes
