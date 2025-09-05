@@ -1,3 +1,18 @@
-git rm -r --cached "List Manga/"
-git rm --cached "old version config.ini"
-git commit -m "Remove ignored files"
+# Environment files
+.env
+.env.*
+config.ini
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Folders
+/old version/
+/List Manga/
+/Manga_OCR_Tool/
+/models/
