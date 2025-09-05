@@ -1,233 +1,188 @@
-# Manga OCR & Typeset Tool v7.8
+# Manga OCR & Typeset Tool v13.0.1
 
-[![Version](https://img.shields.io/badge/version-7.8-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-13.0.1-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
 ---
 
 ## Ringkasan
 
-Aplikasi desktop untuk OCR, terjemahan, dan typesetting teks pada manga/komik. Mendukung multi-engine OCR (Manga-OCR, EasyOCR, Tesseract), koreksi AI (Gemini), terjemahan (DeepL), serta alat typeset lengkap (rectangle, pen/polygon, inline editor, inpainting).
+Aplikasi desktop canggih untuk OCR, terjemahan, dan typesetting teks pada manga/komik dengan dukungan AI. Mendukung multi-engine OCR (Manga-OCR, EasyOCR, Tesseract, PaddleOCR), koreksi dan terjemahan AI (Gemini), serta sistem glosarium pintar.
 
-Versi **7.8** menambahkan konfigurasi eksternal (`config.ini`) dengan pembuatan otomatis saat pertama kali dijalankan.
-
----
-
-# Pipeline Detail: Manga OCR & Typeset Tool v7.8
-
-Berikut adalah **pipeline detail** untuk alur sistem Manga OCR & Typeset Tool v7.8, yang menjelaskan setiap tahap secara berurutan dengan komponen terkait.
+Versi **13.0.1** memperkenalkan sistem worker pool yang dinamis, sistem glosarium berbasis AI, dan perbaikan stabilitas.
 
 ---
 
-## **1. Pipeline Utama Sistem**
+## Pipeline Detail: Manga OCR & Typeset Tool v13.0.1
+
+Berikut adalah **pipeline detail** untuk alur sistem yang telah ditingkatkan:
+
+### **1. Pipeline Utama Sistem**
 
 ```mermaid
 flowchart LR
-    A[Input] --> B[Preprocessing] --> C[OCR] --> D[Post-Processing] --> E[Translation] --> F[Typesetting] --> G[Output]
+    A[Input] --> B[Preprocessing] --> C[OCR Multi-Engine] --> D[AI Enhancement] --> E[Translation] --> F[Glossary Integration] --> G[Typesetting] --> H[Output]
 ```
 
-## **2. Pipeline Detail per Komponen**
+### **2. Pipeline Detail per Komponen**
 
-### **A. Input**
+#### **A. Input & Manajemen Proyek**
 
-- **Tujuan**: Memuat sumber gambar/PDF.
+- **Tujuan**: Memuat sumber gambar/PDF dan mengelola proyek
 - **Komponen**:
 
 ```mermaid
 flowchart LR
     A1[File Dialog] --> A2[Load Image/PDF] --> A3[Deteksi Format] --> A4{PDF?}
-    A4 -->|Ya| A5[Ekstrak Halaman]
-    A4 -->|Tidak| A6[Konversi ke RGB]
+    A4 -->|Ya| A5[Ekstrak Halaman dengan PyMuPDF]
+    A4 -->|Tidak| A6[Konversi ke RGB dengan PIL]
+    A5 & A6 --> A7[Setup Project Directory]
+    A7 --> A8[Load Glossary dari JSON]
 ```
 
-- **Teknik**: `PIL.Image` untuk gambar, `PyMuPDF` untuk PDF, cache daftar file.
+#### **B. Preprocessing Cerdas**
 
-### **B. Preprocessing**
-
-- **Tujuan**: Optimalkan gambar untuk OCR.
+- **Tujuan**: Optimalkan gambar untuk OCR dengan deteksi orientasi otomatis
 - **Komponen**:
 
 ```mermaid
 flowchart LR
-    B1[Konversi ke Grayscale] --> B2[Auto-Rotasi] --> B3[Thresholding] --> B4[Denoising]
+    B1[Konversi ke Grayscale] --> B2[Deteksi Orientasi Otomatis] --> B3[Rotasi Korektif] --> B4[Adaptive Thresholding] --> B5[Denoising]
 ```
 
-- **Parameter**: Rotasi otomatis, adaptive thresholding `cv2.ADAPTIVE_THRESH_GAUSSIAN_C`.
+#### **C. OCR Multi-Engine dengan Fallback**
 
-### **C. OCR**
-
-- **Tujuan**: Ekstraksi teks dari gambar.
-- **Komponen**:
-
-```mermaid
-flowchart LR
-    C1[Pilih Engine] --> C2{Manga-OCR?}
-    C2 -->|Ya| C3[Ekstrak Teks Langsung]
-    C2 -->|Tidak| C4[Deteksi Paragraf]
-    C4 --> C5[Gabungkan Hasil]
-```
-
-- **Engine**: Manga-OCR, EasyOCR, Tesseract (PSM).
-
-### **D. Post-Processing**
-
-- **Tujuan**: Bersihkan teks hasil OCR.
-- **Alur**:
-
-```mermaid
-flowchart LR
-    D1[Remove Extra Spaces] --> D2[Koreksi Case] --> D3{Gemini Active?}
-    D3 -->|Ya| D4[Koreksi Grammar/Spelling]
-    D3 -->|Tidak| D5[Lanjut ke Terjemahan]
-```
-
-- **Fitur**: Gemini API dengan rate limit, cache hasil.
-
-### **E. Translation**
-
-- **Tujuan**: Terjemahkan teks ke bahasa target.
-- **Alur**:
-
-```mermaid
-flowchart LR
-    E1[Kirim ke DeepL] --> E2{API Key Valid?}
-    E2 -->|Ya| E3[Dapatkan Terjemahan]
-    E2 -->|Tidak| E4[Return Error]
-    E3 --> E5[Simpan ke Cache]
-```
-
-- **Optimasi**: Hash teks sebagai key, batch translation.
-
-### **F. Typesetting**
-
-- **Tujuan**: Render teks terjemahan ke gambar.
-- **Alur**:
-
-```mermaid
-flowchart LR
-    F1[Inpainting Area Asli] --> F2[Hitungan Ukuran Font] --> F3[Render Teks] --> F4[Drop Shadow]
-```
-
-- **Teknik**: Inpainting `cv2.INPAINT_TELEA`, auto font scaling, dukungan teks vertikal.
-
-### **G. Output**
-
-- **Tujuan**: Simpan/ekspor hasil.
-- **Pilihan**:
-
-```mermaid
-flowchart LR
-    G1[Simpan Gambar] --> G2[PNG/JPG]
-    G1 --> G3[Simpan Projek]
-    G3 --> G4[Format Pickle]
-    G1 --> G5[Export PDF]
-```
-
-- **Fitur Khusus**: Auto-save tiap 5 menit, batch PDF.
-
----
-
-## **3. Pipeline Error Handling**
+- **Tujuan**: Ekstraksi teks dari gambar dengan engine terbaik untuk bahasa tertentu
+- **Engine & Strategi**:
 
 ```mermaid
 flowchart TD
-    H[Error?] -->|OCR Gagal| I[Fallback ke Engine Lain]
-    H -->|API Limit| J[Nonaktifkan Fitur AI]
-    H -->|File Rusak| K[Skip File]
-    I & J & K --> L[Log Error] --> M[Lanjutkan Proses]
+    C1[Pilih Berdasarkan Bahasa] --> C2{Japanese?}
+    C2 -->|Ya| C3[Manga-OCR Prioritas]
+    C2 -->|Tidak| C4{Chinese/Korean?}
+    C4 -->|Ya| C5[PaddleOCR Prioritas]
+    C4 -->|Tidak| C6[Tesseract/EasyOCR]
+    C3 & C5 & C6 --> C7[Gabungkan Hasil jika Enhanced Pipeline]
 ```
 
----
+#### **D. Enhanced AI Pipeline**
 
-## **4. Diagram Alir Integrasi**
+- **Tujuan**: Tingkatkan akurasi dengan kombinasi Manga-OCR + Tesseract + Gemini
+- **Alur**:
 
 ```mermaid
-flowchart TB
-    subgraph GUI[PyQt5 Interface]
-        A[File List] --> B[Image Display]
-        B --> C[Selection Tools]
-        C --> D[Progress Bar]
-    end
-
-    subgraph Backend[OCR & Translation]
-        E[Worker Threads] --> F[OCR Engine]
-        F --> G[API Calls]
-        G --> H[Cache System]
-    end
-
-    subgraph Output
-        I[Typeset Image] --> J[Save/Export]
-    end
-
-    GUI <-->|Signal/Slot| Backend
-    Backend --> Output
+flowchart LR
+    D1[Manga-OCR Result] --> D2[Tesseract Result] --> D3[Analisis & Merge dengan Gemini] --> D4[Koreksi OCR Errors] --> D5[Terjemahan Kontekstual]
 ```
 
----
+#### **E. Sistem Glosarium AI-Powered**
 
-### **Penjelasan Kunci Pipeline**
+- **Tujuan**: Deteksi otomatis istilah penting dan pertahankan konsistensi terjemahan
+- **Alur**:
 
-1. **Threading**: OCR dan terjemahan di `QThread` untuk hindari freeze GUI.
-2. **Cache Multi-level**: Cache per gambar & projek.
-3. **Fallback System**: Ganti engine otomatis jika gagal.
-4. **PDF Support**: Ekstrak halaman dan navigasi PDF dengan OCR penuh.
+```mermaid
+flowchart TD
+    E1[Original Text] --> E2[Translated Text] --> E3[AI Analysis Gemini]
+    E3 --> E4[Deteksi Proper Nouns] --> E5[Deteksi Unique Terms] --> E6[Deteksi Honorifics]
+    E4 & E5 & E6 --> E7[Generate Suggestions] --> E8[Update Glossary]
+    E8 --> E9[Integrasi ke Prompt Terjemahan]
+```
+
+#### **F. Dynamic Worker Pool**
+
+- **Tujuan**: Pemrosesan paralel untuk throughput maksimal
+- **Strategi**:
+
+```mermaid
+flowchart LR
+    F1[Job Queue] --> F2{Queue Size > Threshold?}
+    F2 -->|Ya| F3[Spawn New Worker]
+    F2 -->|Tidak| F4[Wait]
+    F3 --> F5[Process Job] --> F6[Signal Completion]
+    F6 --> F7[Update UI Thread-safe]
+```
+
+#### **G. Typesetting & Output**
+
+- **Tujuan**: Render teks terjemahan ke gambar dengan preservasi konteks visual
+- **Komponen**:
+
+```mermaid
+flowchart LR
+    G1[Inpainting Area Asli] --> G2[Deteksi Bubble Mask] --> G3[Font Scaling Adaptif] --> G4[Render Teks dengan Outline] --> G5[Simpan/Export]
+```
 
 ---
 
 ## Fitur Utama
 
-### 1. OCR (Optical Character Recognition)
+### 1. OCR Multi-Engine Cerdas
 
-- **Multi‑Engine Support**
+- **Manga-OCR** - Dioptimalkan untuk teks manga Jepang
+- **EasyOCR** - Deteksi multi-bahasa dengan dukungan GPU
+- **Tesseract** - Engine tradisional dengan dukungan bahasa luas
+- **PaddleOCR** - Khusus untuk bahasa China/Korea (opsional)
+- **Deteksi Orientasi Otomatis** dengan rotasi korektif
 
-  - _Manga-OCR_ — optimasi untuk teks manga Jepang (opsional jika library terinstal).
-  - _EasyOCR_ — deteksi multi‑bahasa, dukungan GPU (jika tersedia).
-  - _Tesseract_ — engine tradisional dengan dukungan bahasa (JPN/ENG/CHN/KOR).
+### 2. AI-Powered Translation & Enhancement
 
-- **Deteksi Orientasi Teks** (horizontal / vertikal) dan **rotasi otomatis**.
-- **Preprocessing**: adaptive thresholding, denoise, deskew.
+- **Gemini Integration** untuk koreksi OCR dan terjemahan kontekstual
+- **Enhanced Pipeline** kombinasi Manga-OCR + Tesseract + Gemini
+- **Style Selection**: Santai, Formal, Akrab, Vulgar/Dewasa, Sesuai Konteks Manga
+- **Auto-censorship** untuk konten eksplisit ("vagina" → "meong", "penis" → "burung")
 
-### 2. Penerjemahan
+### 3. Intelligent Glossary System
 
-- Integrasi **DeepL API** untuk hasil terjemahan berkualitas.
-- **Koreksi AI** menggunakan **Gemini API** untuk memperbaiki hasil OCR (typo, spacing, punctuation).
-- Batasan (default): **15 RPM** dan **1000 RPD** (configurable).
+- **AI-Powered Suggestion** - Gemini menganalisis teks untuk menyarankan istilah penting
+- **Glossary Manager** - UI khusus dengan tambah/edit/hapus entri
+- **File-based Persistence** - Disimpan sebagai `glossary.json` dalam folder proyek
+- **Real-time Integration** - Glosarium langsung terintegrasi dalam prompt terjemahan
 
-### 3. Typesetting
+### 4. Dynamic Worker Pool
 
-- **Tools**: Rectangle tool, Pen tool (polygon), Inline editor.
-- **Kustomisasi teks**: font, ukuran, warna, orientasi (H/V), outline effect.
-- **Inpainting**: menghapus teks asli secara otomatis lalu mengganti dengan teks yang di‑typeset.
+- **Scalable Processing** - Hingga 15 worker thread paralel
+- **Intelligent Scaling** - Worker baru dibuat berdasarkan ukuran antrian
+- **Resource Management** - Worker otomatis dihentikan saat idle
+- **Thread-safe UI Updates** - Pembaruan antarmuka yang aman dari thread
 
-### 4. Manajemen Proyek
+### 5. Advanced Typesetting Tools
 
-- Save/Load project (`.manga_proj`) yang menyimpan area typeset, teks, pengaturan.
-- Autosave setiap 5 menit.
+- **Selection Tools**: Rectangle, Pen tool (polygon bebas)
+- **Inline Editor** - Edit teks langsung pada gambar
+- **Vertical Typesetting** - Dukungan untuk teks vertikal
+- **Bubble Detection** - Deteksi otomatis balon teks dengan model DL
+- **Inpainting Algorithms** - Navier-Stokes dan Telea
 
-### 5. Dukungan Format
+### 6. Manajemen Proyek Lengkap
 
-- Gambar: `PNG`, `JPG`, `JPEG`, `BMP`, `WebP`.
-- PDF: buka & edit langsung (PyMuPDF/Fitz). Export folder gambar → PDF (filter: `.png`).
-- Navigasi PDF dengan **scroll mouse**.
+- **Save/Load Project** (`.manga_proj`) dengan semua metadata
+- **Autosave** setiap 5 menit
+- **Batch Processing** - Proses seluruh folder
+- **PDF Support** - Buka, edit, dan ekspor PDF
 
-### 6. Batch Processing
+### 7. API & Resource Management
 
-- Deteksi bubble otomatis (EasyOCR) dan proses seluruh teks dalam satu gambar. (in-progress)
-- Cache hasil OCR/terjemahan untuk menghindari proses berulang.(in-progress)
+- **Multi-API Support** - Gemini (berbagai model) dan DeepL
+- **Rate Limit Management** - Monitoring RPM/RPD real-time
+- **Cost Tracking** - Pelacakan biaya API dalam USD dan IDR
+- **Automatic Retry** - Mekanisme antrian saat limit tercapai
 
 ---
 
-## Kelebihan & Kekurangan
+## Kelebihan v13.0.1
 
 **Kelebihan**
 
-- Antarmuka ramah pengguna (dark/light mode).
-- Modular: mudah ganti engine OCR / layanan terjemahan.
+- Performa drastically improved dengan worker pool dinamis
+- Akurasi terjemahan lebih tinggi dengan enhanced pipeline
+- Konsistensi terjemahan dengan sistem glosarium AI
+- Manajemen resource yang lebih efisien
+- UI yang lebih informatif dengan status real-time
 
-**Kekurangan**
+**Pertimbangan**
 
-- Banyak dependency (install awal berat).
-- Pembatasan API (Gemini / DeepL) dapat membatasi throughput.
-- Untuk performa optimal, disarankan GPU (EasyOCR).
+- Konsumsi memori lebih tinggi dengan banyak worker
+- Dependency complex (perlu GPU untuk performa optimal)
+- Biaya API mungkin meningkat dengan penggunaan intensif
 
 ---
 
@@ -236,30 +191,45 @@ flowchart TB
 **Prasyarat**
 
 - Python 3.8+
-- Tesseract OCR (install terpisah). Default path Windows: `C:\Program Files\Tesseract-OCR\tesseract.exe`.
+- Tesseract OCR (install terpisah)
+- GPU recommended untuk EasyOCR/PaddleOCR
 
-**Langkah**
+**Langkah Instalasi**
 
 ```bash
-# Buat virtualenv (opsional tapi direkomendasikan)
+# Buat virtual environment
 python -m venv venv
 source venv/bin/activate   # macOS/Linux
 venv\Scripts\activate    # Windows
 
 # Install dependencies
 pip install --upgrade pip
-pip install PyQt5 numpy opencv-python requests Pillow torch torchvision torchaudio
-pip install pytesseract easyocr google-generativeai manga-ocr
-pip install PyMuPDF
+pip install -r requirements.txt
+
+# Install engines OCR opsional
+pip install manga-ocr    # Untuk Manga-OCR
+pip install paddleocr    # Untuk PaddleOCR
 ```
 
-> Catatan: `manga-ocr` bersifat opsional. Jika tidak terinstal, engine Manga-OCR akan otomatis dinonaktifkan.
+**File requirements.txt:**
+
+```
+PyQt5>=5.15
+numpy>=1.21
+opencv-python>=4.5
+requests>=2.28
+Pillow>=9.0
+google-generativeai>=0.3.0
+pytesseract>=0.3.10
+easyocr>=1.6
+PyMuPDF>=1.22
+```
 
 ---
 
 ## Konfigurasi (config.ini)
 
-Pada pertama kali menjalankan aplikasi, file `config.ini` akan dibuat otomatis jika belum ada. Contoh isi `config.ini`:
+File konfigurasi dibuat otomatis saat pertama kali menjalankan aplikasi:
 
 ```ini
 [API]
@@ -268,111 +238,140 @@ GEMINI_KEY = YOUR_GEMINI_API_KEY_HERE
 
 [PATHS]
 TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
-
 ```
 
-**Langkah setting**: buka file `config.ini` dan ganti placeholder API key dengan key asli.
+**Catatan**: Ganti placeholder dengan API key sebenarnya untuk menggunakan fitur AI.
 
 ---
 
-## Cara Pakai (Quick Start)
+## Cara Penggunaan
 
-1. Jalankan aplikasi: `python main.py`
-2. Pada run pertama, buka `config.ini` dan isi API key serta verifikasi `TESSERACT_PATH`.
-3. Muat gambar atau PDF (`File → Open`).
-4. Pilih engine OCR di panel kanan (EasyOCR / Tesseract / Manga-OCR).
-5. Gunakan Rectangle/Pen tool untuk memilih area teks.
-6. Klik `OCR Selected` → review hasil di panel OCR.
-7. Klik `Translate` untuk menerjemahkan (opsional).
-8. Pilih font & style lalu `Apply Typeset` untuk menimpa area.
-9. Simpan project (`File → Save Project`) atau ekspor gambar/PDF (`Export`).
+### 1. Setup Awal
 
----
+- Jalankan aplikasi: `python main.py`
+- Konfigurasi API keys di `config.ini`
+- Muat folder project dengan gambar/PDF
 
-## Video Demo & Examples
+### 2. Proses Translasi
 
-[![Tonton Video]](https://youtu.be/SImZYo-nxvk)
+1. Pilih engine OCR berdasarkan bahasa sumber
+2. Tentukan style terjemahan yang diinginkan
+3. Seleksi area teks dengan rectangle/pen tool
+4. Review hasil OCR jika perlu
+5. Terjemahkan dengan Gemini/DeepL
 
----
+### 3. Kelola Glosarium
 
-## Developer Notes
+- Buat entri manual di tab Glossary
+- Review saran otomatis dari AI
+- Terapkan glosarium untuk konsistensi
 
-- Pastikan untuk menambahkan rate limiter pada panggilan ke Gemini/DeepL agar tidak melebihi quota.
-- Gunakan cache (file-based) untuk menyimpan hasil OCR/terjemahan per file_hash.
-- Untuk performa: aktifkan CUDA jika tersedia dan EasyOCR mendukungnya.
+### 4. Batch Processing
+
+- Gunakan "Detect All Files" untuk proses otomatis
+- Review dan konfirmasi detected bubbles
+- Proses seluruh bubble sekaligus
+
+### 5. Export Results
+
+- Simpan individual image dengan "Save Image"
+- Export batch dengan "Batch Save"
+- Export ke PDF untuk kumpulan halaman
 
 ---
 
 ## Troubleshooting
 
-- **Tesseract not found**: Pastikan path di `config.ini` benar dan Tesseract terinstal.
-- **manga-ocr missing**: `pip install manga-ocr` atau gunakan EasyOCR/Tesseract sebagai fallback.
-- **API errors / rate limit**: turunkan frekuensi batch, atau aktifkan cache untuk mengurangi request.
+**Masalah Umum dan Solusi:**
+
+1. **Engine OCR tidak berjalan**:
+
+   - Pastikan Tesseract terinstall dan path benar di config.ini
+   - Untuk Manga-OCR/PaddleOCR: `pip install manga-ocr paddleocr`
+
+2. **Error API Limit**:
+
+   - Monitor usage di status bar bawah
+   - Tunggu hingga limit reset atau upgrade plan API
+
+3. **Performance lambat**:
+
+   - Kurangi jumlah worker di pengaturan
+   - Gunakan GPU untuk engine OCR yang mendukung
+
+4. **Glossary tidak tersimpan**:
+   - Pastikan folder project mempunyai permission write
+   - Cek file `glossary.json` di folder project
+
+---
+
+## API Usage & Cost Management
+
+Aplikasi mendukung berbagai model Gemini dengan karakteristik berbeda:
+
+| Model                 | Kecepatan  | Biaya        | Recommended Use                  |
+| --------------------- | ---------- | ------------ | -------------------------------- |
+| Gemini 2.5 Flash Lite | ⚡⚡⚡⚡⚡ | $0.0001/1K   | Default, pemrosesan tinggi       |
+| Gemini 2.5 Flash      | ⚡⚡⚡⚡   | $0.000125/1K | Fallback 1, akurasi lebih tinggi |
+| Gemini 2.5 Pro        | ⚡⚡⚡     | $0.0025/1K   | Teks kompleks dan penting        |
+| Gemini 2.0 Flash Lite | ⚡⚡⚡⚡⚡ | $0.0001/1K   | Darurat saat limit 2.5           |
 
 ---
 
 ## License
 
-MIT
+MIT License - lihat file LICENSE untuk detail lengkap.
 
 ---
 
 ## Contributing
 
-Silakan buka issue atau pull request. Ikuti kode gaya Python (PEP8) dan tambahkan unit tests untuk fitur baru.
+Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu untuk didiskusikan.
+
+**Panduan kontribusi:**
+
+1. Fork repository
+2. Buat feature branch
+3. Commit changes
+4. Push ke branch
+5. Buat Pull Request
 
 ---
 
-# --- FITUR BARU DI v7.8 (Konfigurasi Eksternal) ---
+# Changelog
 
-1. File Konfigurasi (config.ini): API Key dan path Tesseract sekarang dikelola di luar skrip dalam file `config.ini`. Ini meningkatkan keamanan dan memudahkan pembaruan.
-2. Pembuatan Config Otomatis: Jika `config.ini` tidak ditemukan saat aplikasi pertama kali dijalankan, file tersebut akan dibuat secara otomatis dengan nilai placeholder, memandu pengguna untuk melakukan setup.
+## v13.0.1 (Current)
 
-# --- v7.7 (Peningkatan PDF & UX) ---
+- **[FIX]** Runtime crash dalam worker glossary (`RuntimeError: wrapped C/C++ object of type QThread has been deleted`)
+- **[IMPROVEMENT]** Worker pool scaling yang lebih agresif (threshold diturunkan dari 5 ke 3)
 
-1. Navigasi Scroll PDF: Pengguna sekarang dapat menggunakan mouse wheel (scroll) untuk berpindah antar halaman saat melihat dokumen PDF, memberikan pengalaman navigasi yang lebih cepat dan intuitif.
-2. Filter Ekspor PNG: Fitur "Export to PDF" sekarang secara spesifik hanya akan menyertakan file .png, memastikan output yang lebih bersih dan terprediksi.
+## v13.0.0
 
-# --- v7.6 (Integrasi PDF) ---
+- **[MAJOR]** Intelligent worker pooling dengan hingga 15 thread paralel
+- **[MAJOR]** AI-powered glossary system dengan saran otomatis
+- **[MAJOR]** Glossary manager UI dengan file-based persistence
+- **[ENHANCEMENT]** Enhanced pipeline dengan kombinasi Manga-OCR + Tesseract + Gemini
 
-1. Ekspor ke PDF: Menambahkan opsi "File > Export Folder to PDF..." untuk mengonversi semua gambar di folder saat ini menjadi satu file PDF. File diurutkan secara numerik (natural sort) untuk memastikan urutan yang benar.
-2. Penampil PDF Internal: Aplikasi sekarang dapat membuka dan menampilkan file .pdf langsung di jendela utama. Pengguna dapat menavigasi halaman PDF menggunakan tombol "Next" dan "Previous".
-3. Fungsionalitas Penuh pada PDF: Semua alat OCR, seleksi, dan typesetting berfungsi pada halaman PDF yang sedang ditampilkan, sama seperti pada gambar biasa.
+## v12.0.3
 
-# --- v7.5 (Perbaikan Stabilitas Kritis) ---
+- **[FIX]** Crash `cv2.mean` dengan validasi dimensi gambar
+- **[IMPROVEMENT]** Auto-add glossary suggestions dengan pencegahan duplikat
+- **[IMPROVEMENT]** Expanded translation styles dengan prompt yang lebih deskriptif
 
-1. Perbaikan Threading Limit API: Memperbaiki crash "QObject::startTimer: Timers cannot be started from another thread" yang terjadi saat limit API tercapai. Logika UI (memulai timer, menampilkan dialog) sekarang dipisahkan sepenuhnya dari logika pengecekan limit, memastikan semua operasi UI berjalan aman di main thread.
-2. Alur Kerja Non-Review yang Lebih Mulus: Memperbaiki race condition yang menyebabkan error "A process is already running" saat checkbox "Review Before Translate" tidak dicentang. Transisi dari OCR ke Translate sekarang dijadwalkan dengan benar, memberikan waktu bagi thread sebelumnya untuk selesai.
+## v12.0.2
 
-# --- v7.4 (Perbaikan Stabilitas & Threading) ---
+- **[FIX]** `AttributeError` pada Gemini API calls
+- **[IMPROVEMENT]** Kembalikan opsi orientasi teks (Horizontal/Vertical)
+- **[IMPROVEMENT]** Logika penguncian bahasa OCR yang disempurnakan
 
-1. Perbaikan Alur Kerja Non-Review: Memperbaiki race condition yang menyebabkan error "A process is already running" saat checkbox "Review Before Translate" tidak dicentang. Transisi dari OCR ke Translate sekarang dijadwalkan dengan benar, memberikan waktu bagi thread sebelumnya untuk selesai.
-2. Penanganan Limit API yang Aman untuk Thread: Memperbaiki crash dan freeze saat limit API tercapai. Peringatan dan timer sekarang dikelola sepenuhnya di main thread melalui sinyal, mencegah error threading.
-3. Sinyal API Limit Baru: Menambahkan sinyal khusus `api_limit_reached` untuk berkomunikasi dari worker ke main thread, memastikan semua dialog dan update UI aman.
+## v8.0-v12.0
 
-# --- v7.3 (Perbaikan Bug Kritis) ---
-
-1. Perbaikan Konversi Gambar: Memperbaiki `TypeError` fatal yang terjadi saat menggambar ulang area yang sudah di-typeset. Logika konversi dari gambar PIL ke QImage telah diganti dengan metode yang benar dan stabil untuk mencegah crash.
-2. Peningkatan Stabilitas Inisialisasi: Menambahkan pemeriksaan tambahan untuk memastikan instance Manga-OCR benar-benar dibuat sebelum digunakan, mencegah error "not initialized" jika terjadi kegagalan saat startup.
-
-# --- v7.2 (Perbaikan Bug Kritis) ---
-
-1. Perbaikan Tipe Argumen Rendering: Memperbaiki `TypeError` fatal yang terjadi saat menggambar ulang area yang sudah di-typeset. Masalah ini disebabkan oleh penggunaan objek `ImageQt` di mana `QImage` diharapkan. Konversi eksplisit ke `QImage` telah diterapkan untuk menyelesaikan crash.
-2. Peningkatan Stabilitas Inisialisasi: Menambahkan pemeriksaan tambahan untuk memastikan instance Manga-OCR benar-benar dibuat sebelum digunakan, mencegah error "not initialized" jika terjadi kegagalan saat startup.
-
-# --- v7.1 (Perbaikan Bug) ---
-
-1. Inisialisasi OCR yang Tangguh: Inisialisasi setiap engine OCR (Manga-OCR, EasyOCR) ditangani secara terpisah. Kegagalan pada satu engine tidak akan menghentikan inisialisasi engine lainnya.
-2. Perbaikan Rendering Gambar: Memperbaiki `TypeError` yang terjadi saat menggambar ulang area yang sudah di-typeset dengan menggunakan konversi gambar yang benar (PIL ke QImage).
-3. Klarifikasi Teks Vertikal: Menambahkan dokumentasi untuk memperjelas bahwa teks vertikal dari hasil OCR secara otomatis diubah menjadi satu baris horizontal untuk proses terjemahan.
-4. Logika Typesetting Vertikal yang Lebih Jelas: Mengganti nama fungsi dan menambahkan komentar untuk menjelaskan bahwa typesetting vertikal dicapai dengan merotasi blok teks, yang merupakan pendekatan umum.
-
-# --- v7.0 ---
-
-1. Integrasi Manga-OCR: Menambahkan 'manga-ocr' sebagai engine OCR baru, dioptimalkan untuk teks manga vertikal dan horizontal.
-2. Kontrol Orientasi Teks: Dropdown baru untuk memilih orientasi teks (Auto, Horizontal, Vertikal) secara manual, meningkatkan akurasi Tesseract dan EasyOCR.
-3. Perbaikan Alur "Review Before Translate": Proses dipecah menjadi dua tahap (OCR -> Review -> Translate) menggunakan sinyal antar-thread untuk memastikan dialog review muncul dengan benar di main thread tanpa membekukan GUI.
-4. Perbaikan Mode Batch: Proses batch dibuat lebih tangguh dengan error handling per-gelembung teks. Kegagalan pada satu area tidak akan menghentikan seluruh proses.
-5. Refactoring Worker Threads: Logika worker dipisahkan menjadi OCRWorker dan TranslateWorker untuk alur kerja yang lebih bersih dan modular.
+- Integrasi Manga-OCR dan PaddleOCR
+- Deteksi bubble otomatis dengan model DL
+- Batch processing dan PDF export
+- Manajemen proyek dan autosave
+- Inpainting dan advanced typesetting tools
 
 ---
+
+Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
