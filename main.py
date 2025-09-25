@@ -1,4 +1,4 @@
-﻿# Manga OCR & Typeset Tool v16.1.0
+﻿# Manga OCR & Typeset Tool v16.2.0
 # ==============================
 # 📦 Import modul bawaan Python
 # ==============================
@@ -30,6 +30,7 @@ from PIL import Image
 from PIL.ImageQt import ImageQt
 import io
 from PIL import ImageFile
+import math
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -41,15 +42,17 @@ from PyQt5.QtWidgets import (
     QWidget, QFileDialog, QTextEdit, QScrollArea, QComboBox, QMessageBox,
     QProgressBar, QShortcut, QListWidget, QListWidgetItem, QColorDialog, QFontDialog,
     QLineEdit, QAction, QDialog, QDialogButtonBox, QCheckBox, QStatusBar, QAbstractItemView, QSpinBox,
-    QTabWidget, QGroupBox, QGridLayout, QFrame, QSplitter, QRadioButton
+    QTabWidget, QGroupBox, QGridLayout, QFrame, QSplitter, QRadioButton, QToolButton,
+    QFontComboBox, QDoubleSpinBox, QMenu
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QPen, QColor, QFont, QKeySequence, QPolygon,
-    QPainterPath, QPolygonF, QImage, QIcon, QWheelEvent
+    QPainterPath, QPolygonF, QImage, QIcon, QWheelEvent, QTextDocument,
+    QTextCharFormat, QTextCursor, QBrush, QFontMetrics, QTransform, QTextBlockFormat
 )
 from PyQt5.QtCore import (
     Qt, QRect, QPoint, pyqtSignal, QTimer, QThread, QObject,
-    QFileSystemWatcher, QRectF, QMutex
+    QFileSystemWatcher, QRectF, QMutex, QPointF, QSignalBlocker
 )
 
 # ==============================
@@ -319,7 +322,16 @@ class QueueProcessorWorker(QObject):
                     new_area = TypesetArea(
                         job['rect'], translated_text,
                         settings['font'], settings['color'],
-                        job.get('polygon')
+                        job.get('polygon'),
+                        orientation=settings.get('orientation_mode', 'horizontal'),
+                        effect=settings.get('text_effect', 'none'),
+                        effect_intensity=settings.get('effect_intensity', 20.0),
+                        bezier_points=settings.get('bezier_points'),
+                        bubble_enabled=settings.get('create_bubble', False),
+                        alignment=settings.get('alignment', 'center'),
+                        line_spacing=settings.get('line_spacing', 1.1),
+                        char_spacing=settings.get('char_spacing', 100.0),
+                        margins=settings.get('margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
                     )
                     self.signals.job_complete.emit(image_path, new_area, original_text, translated_text)
 
@@ -602,7 +614,16 @@ Your final output must ONLY be the translated {target_lang} text, with each tran
                     new_area = TypesetArea(
                         job['rect'], translated_text,
                         self.settings['font'], self.settings['color'],
-                        job.get('polygon')
+                        job.get('polygon'),
+                        orientation=self.settings.get('orientation_mode', 'horizontal'),
+                        effect=self.settings.get('text_effect', 'none'),
+                        effect_intensity=self.settings.get('effect_intensity', 20.0),
+                        bezier_points=self.settings.get('bezier_points'),
+                        bubble_enabled=self.settings.get('create_bubble', False),
+                        alignment=self.settings.get('alignment', 'center'),
+                        line_spacing=self.settings.get('line_spacing', 1.1),
+                        char_spacing=self.settings.get('char_spacing', 100.0),
+                        margins=self.settings.get('margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
                     )
                     self.signals.batch_job_complete.emit(image_path, new_area)
 
@@ -697,59 +718,566 @@ class ReviewDialog(QDialog):
         return self.text_edit.toPlainText()
 
 
-class TextEditDialog(QDialog):
-    """Modal dialog that lets users fine-tune existing typeset text."""
+class AdvancedTextEditDialog(QDialog):
+    EFFECT_OPTIONS = [
+        ("None", "none"),
+        ("Curved", "curved"),
+        ("Wavy", "wavy"),
+        ("Jagged Shout", "jagged"),
+    ]
+    ALIGN_OPTIONS = [
+        ("Center", Qt.AlignHCenter),
+        ("Left", Qt.AlignLeft),
+        ("Right", Qt.AlignRight),
+        ("Justify", Qt.AlignJustify),
+    ]
+    EMOJI_PRESETS = [
+        ("Heart", "❤"),
+        ("Sparkle", "✨"),
+        ("Star", "★"),
+        ("Music", "♪"),
+        ("Shock", "!?"),
+        ("Sweat", "💦"),
+        ("Smile", "😊"),
+        ("Angry", "😠"),
+    ]
 
     def __init__(self, area, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Edit Text")
+        self.area = area
+        self.result = None
+        self.setWindowTitle("Advanced Text Editor")
         self.setModal(True)
-        self.resize(460, 260)
+        self.resize(820, 600)
 
-        layout = QVBoxLayout(self)
-        header = QLabel("Update the selected text. Changes apply once you press Apply.")
+        main_layout = QVBoxLayout(self)
+        header = QLabel("Fine-tune text formatting. Select a range to style only that portion or press Ctrl+A to target the whole bubble.")
         header.setWordWrap(True)
-        layout.addWidget(header)
+        main_layout.addWidget(header)
 
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(area.text)
-        self.text_edit.setFont(area.get_font())
-        self.text_edit.setMinimumHeight(140)
-        self.text_edit.selectAll()
-        layout.addWidget(self.text_edit)
-        self.text_edit.setFocus()
+        toolbar_layout = QHBoxLayout()
+        self.font_combo = QFontComboBox(); self.font_combo.setMaximumWidth(240)
+        toolbar_layout.addWidget(self.font_combo)
+
+        self.font_size_spin = QDoubleSpinBox(); self.font_size_spin.setRange(4.0, 220.0); self.font_size_spin.setDecimals(1); self.font_size_spin.setSingleStep(1.0); self.font_size_spin.setSuffix(" pt")
+        toolbar_layout.addWidget(self.font_size_spin)
+
+        self.bold_button = QToolButton(); self.bold_button.setText("B"); self.bold_button.setCheckable(True); self.bold_button.setToolTip("Toggle bold")
+        toolbar_layout.addWidget(self.bold_button)
+
+        self.italic_button = QToolButton(); self.italic_button.setText("I"); self.italic_button.setCheckable(True); self.italic_button.setToolTip("Toggle italic")
+        toolbar_layout.addWidget(self.italic_button)
+
+        self.underline_button = QToolButton(); self.underline_button.setText("U"); self.underline_button.setCheckable(True); self.underline_button.setToolTip("Toggle underline")
+        toolbar_layout.addWidget(self.underline_button)
+
+        self.color_button = QToolButton(); self.color_button.setText("Color"); self.color_button.setToolTip("Change text color")
+        toolbar_layout.addWidget(self.color_button)
+
+        self.emoji_button = QToolButton(); self.emoji_button.setText("Emotes"); self.emoji_button.setToolTip("Insert emoticons or symbols")
+        self.emoji_menu = QMenu(self)
+        for label, symbol in self.EMOJI_PRESETS:
+            action = self.emoji_menu.addAction(f"{label} {symbol}")
+            action.triggered.connect(lambda checked=False, s=symbol: self._insert_emoji(s))
+        self.emoji_button.setMenu(self.emoji_menu); self.emoji_button.setPopupMode(QToolButton.InstantPopup)
+        toolbar_layout.addWidget(self.emoji_button)
+
+        toolbar_layout.addStretch()
+        main_layout.addLayout(toolbar_layout)
+
+        self.text_edit = QTextEdit(); self.text_edit.setAcceptRichText(True); self.text_edit.setMinimumHeight(260)
+        main_layout.addWidget(self.text_edit, 1)
+
+        layout_group = QGroupBox("Layout & Effects")
+        layout_grid = QGridLayout(layout_group)
+
+        self.orientation_combo = QComboBox(); self.orientation_combo.addItems(["Horizontal", "Vertical"])
+        layout_grid.addWidget(QLabel("Orientation:"), 0, 0); layout_grid.addWidget(self.orientation_combo, 0, 1)
+
+        self.effect_combo = QComboBox()
+        for label, value in self.EFFECT_OPTIONS:
+            self.effect_combo.addItem(label, value)
+        layout_grid.addWidget(QLabel("Effect:"), 0, 2); layout_grid.addWidget(self.effect_combo, 0, 3)
+
+        self.effect_intensity_spin = QDoubleSpinBox(); self.effect_intensity_spin.setRange(0.0, 300.0); self.effect_intensity_spin.setDecimals(1); self.effect_intensity_spin.setSingleStep(5.0)
+        layout_grid.addWidget(QLabel("Effect Strength:"), 1, 0); layout_grid.addWidget(self.effect_intensity_spin, 1, 1)
+
+        self.alignment_combo = QComboBox()
+        for label, _ in self.ALIGN_OPTIONS:
+            self.alignment_combo.addItem(label)
+        layout_grid.addWidget(QLabel("Alignment:"), 1, 2); layout_grid.addWidget(self.alignment_combo, 1, 3)
+
+        self.line_spacing_spin = QDoubleSpinBox(); self.line_spacing_spin.setRange(0.6, 3.0); self.line_spacing_spin.setSingleStep(0.1); self.line_spacing_spin.setValue(1.0)
+        layout_grid.addWidget(QLabel("Line Spacing:"), 2, 0); layout_grid.addWidget(self.line_spacing_spin, 2, 1)
+
+        self.char_spacing_spin = QDoubleSpinBox(); self.char_spacing_spin.setRange(50.0, 400.0); self.char_spacing_spin.setSingleStep(5.0); self.char_spacing_spin.setSuffix(" %")
+        layout_grid.addWidget(QLabel("Character Spacing:"), 2, 2); layout_grid.addWidget(self.char_spacing_spin, 2, 3)
+
+        self.bubble_checkbox = QCheckBox("Render bubble (white fill, black outline)")
+        layout_grid.addWidget(self.bubble_checkbox, 3, 0, 1, 4)
+
+        main_layout.addWidget(layout_group)
+
+        margin_group = QGroupBox("Inner Margins (px)")
+        margin_grid = QGridLayout(margin_group)
+        self.margin_top_spin = QSpinBox(); self.margin_top_spin.setRange(0, 400)
+        self.margin_right_spin = QSpinBox(); self.margin_right_spin.setRange(0, 400)
+        self.margin_bottom_spin = QSpinBox(); self.margin_bottom_spin.setRange(0, 400)
+        self.margin_left_spin = QSpinBox(); self.margin_left_spin.setRange(0, 400)
+        margin_grid.addWidget(QLabel("Top:"), 0, 0); margin_grid.addWidget(self.margin_top_spin, 0, 1)
+        margin_grid.addWidget(QLabel("Right:"), 0, 2); margin_grid.addWidget(self.margin_right_spin, 0, 3)
+        margin_grid.addWidget(QLabel("Bottom:"), 1, 0); margin_grid.addWidget(self.margin_bottom_spin, 1, 1)
+        margin_grid.addWidget(QLabel("Left:"), 1, 2); margin_grid.addWidget(self.margin_left_spin, 1, 3)
+        main_layout.addWidget(margin_group)
+
+        bezier_group = QGroupBox("Bezier Control Points (0.0 - 1.0)")
+        bezier_layout = QGridLayout(bezier_group)
+        self.cp1x_spin = self._create_bezier_spin(); self.cp1y_spin = self._create_bezier_spin()
+        self.cp2x_spin = self._create_bezier_spin(); self.cp2y_spin = self._create_bezier_spin()
+        bezier_layout.addWidget(QLabel("Control 1 X:"), 0, 0); bezier_layout.addWidget(self.cp1x_spin, 0, 1)
+        bezier_layout.addWidget(QLabel("Control 1 Y:"), 0, 2); bezier_layout.addWidget(self.cp1y_spin, 0, 3)
+        bezier_layout.addWidget(QLabel("Control 2 X:"), 1, 0); bezier_layout.addWidget(self.cp2x_spin, 1, 1)
+        bezier_layout.addWidget(QLabel("Control 2 Y:"), 1, 2); bezier_layout.addWidget(self.cp2y_spin, 1, 3)
+        main_layout.addWidget(bezier_group)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
         button_box.button(QDialogButtonBox.Save).setText("Apply")
-        button_box.accepted.connect(self.accept)
+        button_box.accepted.connect(self._handle_accept)
         button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        main_layout.addWidget(button_box)
 
-    def get_text(self):
-        return self.text_edit.toPlainText()
+        self.font_combo.currentFontChanged.connect(self._change_font_family)
+        self.font_size_spin.valueChanged.connect(self._change_font_size)
+        self.bold_button.toggled.connect(self._toggle_bold)
+        self.italic_button.toggled.connect(self._toggle_italic)
+        self.underline_button.toggled.connect(self._toggle_underline)
+        self.color_button.clicked.connect(self._choose_color)
+        self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_from_cursor)
+        self.alignment_combo.currentIndexChanged.connect(self._apply_alignment)
+        self.line_spacing_spin.valueChanged.connect(self._apply_line_spacing)
+        self.char_spacing_spin.valueChanged.connect(self._apply_char_spacing)
+
+        self._load_area_into_editor()
+        self._sync_toolbar_from_cursor()
+
+    def _create_bezier_spin(self):
+        spin = QDoubleSpinBox()
+        spin.setRange(-1.0, 2.0)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.05)
+        return spin
+
+    def _load_area_into_editor(self):
+        self.text_edit.clear()
+        cursor = QTextCursor(self.text_edit.document())
+        cursor.movePosition(QTextCursor.Start)
+
+        segments = self.area.get_segments()
+        if not segments:
+            segments = [{'text': self.area.text or '', 'font': self.area.font_to_dict(self.area.get_font()), 'color': self.area.get_color().name(), 'underline': False}]
+
+        for segment in segments:
+            text_value = segment.get('text', '')
+            if not text_value:
+                continue
+            fmt = QTextCharFormat()
+            seg_font = self.area.segment_to_qfont(segment)
+            fmt.setFont(seg_font)
+            fmt.setForeground(QBrush(self.area.segment_to_color(segment)))
+            if segment.get('underline', seg_font.underline()):
+                fmt.setFontUnderline(True)
+
+            parts = text_value.split('\n')
+            for idx, part in enumerate(parts):
+                cursor.insertText(part, fmt)
+                if idx < len(parts) - 1:
+                    cursor.insertBlock()
+
+        orientation = self.area.get_orientation()
+        with QSignalBlocker(self.orientation_combo):
+            self.orientation_combo.setCurrentIndex(1 if orientation == 'vertical' else 0)
+
+        current_effect = self.area.get_effect()
+        effect_idx = next((i for i, (_, val) in enumerate(self.EFFECT_OPTIONS) if val == current_effect), 0)
+        with QSignalBlocker(self.effect_combo):
+            self.effect_combo.setCurrentIndex(effect_idx)
+
+        self.effect_intensity_spin.setValue(self.area.get_effect_intensity())
+        self.bubble_checkbox.setChecked(bool(getattr(self.area, 'bubble_enabled', False)))
+
+        bezier = self.area.get_bezier_points()
+        if len(bezier) >= 2:
+            self.cp1x_spin.setValue(bezier[0].get('x', 0.25)); self.cp1y_spin.setValue(bezier[0].get('y', 0.2))
+            self.cp2x_spin.setValue(bezier[1].get('x', 0.75)); self.cp2y_spin.setValue(bezier[1].get('y', 0.2))
+
+        margins = self.area.get_margins()
+        self.margin_top_spin.setValue(int(margins.get('top', 12)))
+        self.margin_right_spin.setValue(int(margins.get('right', 12)))
+        self.margin_bottom_spin.setValue(int(margins.get('bottom', 12)))
+        self.margin_left_spin.setValue(int(margins.get('left', 12)))
+
+        align_value = self.area.get_alignment()
+        align_idx = next((i for i, (label, _) in enumerate(self.ALIGN_OPTIONS) if label.lower().startswith(align_value)), 0)
+        with QSignalBlocker(self.alignment_combo):
+            self.alignment_combo.setCurrentIndex(align_idx)
+        self._apply_alignment()
+
+        self.line_spacing_spin.setValue(self.area.get_line_spacing())
+        self.char_spacing_spin.setValue(self.area.get_char_spacing())
+        self._apply_line_spacing()
+        self._apply_char_spacing()
+
+        base_font = self.area.get_font()
+        with QSignalBlocker(self.font_combo):
+            self.font_combo.setCurrentFont(base_font)
+        with QSignalBlocker(self.font_size_spin):
+            self.font_size_spin.setValue(base_font.pointSizeF() or base_font.pointSize())
+
+    def _insert_emoji(self, text):
+        cursor = self.text_edit.textCursor()
+        cursor.insertText(text)
+        self.text_edit.setTextCursor(cursor)
+
+    def _merge_char_format(self, fmt):
+        cursor = self.text_edit.textCursor()
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.WordUnderCursor)
+        cursor.mergeCharFormat(fmt)
+        self.text_edit.mergeCurrentCharFormat(fmt)
+
+    def _change_font_family(self, font):
+        fmt = QTextCharFormat(); fmt.setFontFamily(font.family())
+        self._merge_char_format(fmt)
+
+    def _change_font_size(self, value):
+        fmt = QTextCharFormat(); fmt.setFontPointSize(float(value))
+        self._merge_char_format(fmt)
+
+    def _toggle_bold(self, checked):
+        fmt = QTextCharFormat(); fmt.setFontWeight(QFont.Bold if checked else QFont.Normal)
+        self._merge_char_format(fmt)
+
+    def _toggle_italic(self, checked):
+        fmt = QTextCharFormat(); fmt.setFontItalic(checked)
+        self._merge_char_format(fmt)
+
+    def _toggle_underline(self, checked):
+        fmt = QTextCharFormat(); fmt.setFontUnderline(checked)
+        self._merge_char_format(fmt)
+
+    def _choose_color(self):
+        color = QColorDialog.getColor(self._current_color_from_cursor(), self, "Select Text Color")
+        if color.isValid():
+            fmt = QTextCharFormat(); fmt.setForeground(QBrush(color))
+            self._merge_char_format(fmt)
+            self._update_color_button(color)
+
+    def _current_color_from_cursor(self):
+        fmt = self.text_edit.currentCharFormat()
+        brush = fmt.foreground()
+        return brush.color() if brush.style() != Qt.NoBrush else self.area.get_color()
+
+    def _update_color_button(self, color):
+        if color.isValid():
+            self.color_button.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #222; color: white;")
+        else:
+            self.color_button.setStyleSheet("")
+
+    def _apply_alignment(self):
+        doc = self.text_edit.document()
+        original = self.text_edit.textCursor()
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.Document)
+        block_format = QTextBlockFormat()
+        align_label, align_flag = self.ALIGN_OPTIONS[self.alignment_combo.currentIndex()]
+        block_format.setAlignment(align_flag)
+        block_format.setLineHeight(int(self.line_spacing_spin.value() * 100), QTextBlockFormat.ProportionalHeight)
+        cursor.setBlockFormat(block_format)
+        self.text_edit.setTextCursor(original)
+
+    def _apply_line_spacing(self):
+        doc = self.text_edit.document()
+        original = self.text_edit.textCursor()
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.Document)
+        block_format = QTextBlockFormat()
+        block_format.setLineHeight(int(self.line_spacing_spin.value() * 100), QTextBlockFormat.ProportionalHeight)
+        _, align_flag = self.ALIGN_OPTIONS[self.alignment_combo.currentIndex()]
+        block_format.setAlignment(align_flag)
+        cursor.setBlockFormat(block_format)
+        self.text_edit.setTextCursor(original)
+
+    def _apply_char_spacing(self):
+        spacing_value = self.char_spacing_spin.value()
+        original = self.text_edit.textCursor()
+        cursor = QTextCursor(self.text_edit.document())
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.Document)
+        fmt = QTextCharFormat()
+        base_font = self.text_edit.currentCharFormat().font()
+        if not base_font.family():
+            base_font = self.area.get_font()
+        font = QFont(base_font)
+        font.setLetterSpacing(QFont.PercentageSpacing, spacing_value)
+        fmt.setFont(font)
+        cursor.mergeCharFormat(fmt)
+        cursor.endEditBlock()
+        self.text_edit.setTextCursor(original)
+
+    def _sync_toolbar_from_cursor(self):
+        fmt = self.text_edit.currentCharFormat()
+        fam = fmt.fontFamily() or self.area.get_font().family()
+        with QSignalBlocker(self.font_combo): self.font_combo.setCurrentFont(QFont(fam))
+        point = fmt.fontPointSize() or self.area.get_font().pointSizeF() or self.area.get_font().pointSize()
+        with QSignalBlocker(self.font_size_spin): self.font_size_spin.setValue(point)
+        with QSignalBlocker(self.bold_button): self.bold_button.setChecked(fmt.fontWeight() >= QFont.Bold)
+        with QSignalBlocker(self.italic_button): self.italic_button.setChecked(fmt.fontItalic())
+        with QSignalBlocker(self.underline_button): self.underline_button.setChecked(fmt.fontUnderline())
+        self._update_color_button(self._current_color_from_cursor())
+
+    def _extract_segments(self):
+        doc = self.text_edit.document()
+        segments = []
+        block = doc.begin()
+        while block != doc.end():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    text = fragment.text()
+                    if text:
+                        fmt = fragment.charFormat()
+                        font = fmt.font()
+                        segments.append({
+                            'text': text,
+                            'font': TypesetArea.font_to_dict(font),
+                            'color': fmt.foreground().color().name() if fmt.foreground().color().isValid() else self.area.get_color().name(),
+                            'underline': fmt.fontUnderline(),
+                        })
+                it += 1
+            block = block.next()
+            if block != doc.end():
+                segments.append({'text': '\n', 'font': TypesetArea.font_to_dict(self.area.get_font()), 'color': self.area.get_color().name(), 'underline': False})
+        return segments
+
+    def _handle_accept(self):
+        segments = self._extract_segments()
+        plain_text = ''.join(seg.get('text', '') for seg in segments)
+        orientation = 'vertical' if self.orientation_combo.currentIndex() == 1 else 'horizontal'
+        effect = self.effect_combo.currentData()
+        bezier_data = [
+            {'x': self.cp1x_spin.value(), 'y': self.cp1y_spin.value()},
+            {'x': self.cp2x_spin.value(), 'y': self.cp2y_spin.value()},
+        ]
+        margins = {
+            'top': self.margin_top_spin.value(),
+            'right': self.margin_right_spin.value(),
+            'bottom': self.margin_bottom_spin.value(),
+            'left': self.margin_left_spin.value(),
+        }
+        align_label, _ = self.ALIGN_OPTIONS[self.alignment_combo.currentIndex()]
+        self.result = {
+            'segments': segments,
+            'plain_text': plain_text,
+            'orientation': orientation,
+            'effect': effect,
+            'effect_intensity': self.effect_intensity_spin.value(),
+            'bezier_points': bezier_data,
+            'bubble_enabled': self.bubble_checkbox.isChecked(),
+            'alignment': align_label.lower(),
+            'line_spacing': self.line_spacing_spin.value(),
+            'char_spacing': self.char_spacing_spin.value(),
+            'margins': margins,
+        }
+        self.accept()
+
+    def get_result(self):
+        return self.result
+
 
 class TypesetArea:
-    def __init__(self, rect, text, font, color, polygon=None):
+    def __init__(
+        self,
+        rect,
+        text,
+        font,
+        color,
+        polygon=None,
+        orientation='horizontal',
+        effect='none',
+        effect_intensity=20.0,
+        bezier_points=None,
+        bubble_enabled=False,
+        segments=None,
+        bubble_fill='#ffffff',
+        bubble_outline='#000000',
+        bubble_outline_width=3.0,
+        alignment='center',
+        line_spacing=1.1,
+        char_spacing=100.0,
+        margins=None,
+    ):
         self.rect = rect
-        self.text = text
+        self.text = text or ""
         self.font_info = self.font_to_dict(font)
         self.color_info = color.name()
         self.polygon = polygon
+        self.orientation = orientation
+        self.effect = effect
+        self.effect_intensity = effect_intensity
+        self.bezier_points = bezier_points or [
+            {'x': 0.25, 'y': 0.2},
+            {'x': 0.75, 'y': 0.2},
+        ]
+        self.bubble_enabled = bubble_enabled
+        self.bubble_fill = bubble_fill
+        self.bubble_outline = bubble_outline
+        self.bubble_outline_width = bubble_outline_width
+        self.alignment = alignment
+        self.line_spacing = line_spacing
+        self.char_spacing = char_spacing
+        self.margins = margins or {'top': 12, 'right': 12, 'bottom': 12, 'left': 12}
+        self.text_segments = segments if segments is not None else self._build_segments_from_plain(self.text, font, color)
+        self.ensure_defaults()
+
+    def ensure_defaults(self):
+        if not hasattr(self, 'orientation'): self.orientation = 'horizontal'
+        if not hasattr(self, 'effect'): self.effect = 'none'
+        if not hasattr(self, 'effect_intensity'): self.effect_intensity = 20.0
+        if not getattr(self, 'bezier_points', None):
+            self.bezier_points = [{'x': 0.25, 'y': 0.2}, {'x': 0.75, 'y': 0.2}]
+        if not hasattr(self, 'bubble_enabled'): self.bubble_enabled = False
+        if not getattr(self, 'bubble_fill', None): self.bubble_fill = '#ffffff'
+        if not getattr(self, 'bubble_outline', None): self.bubble_outline = '#000000'
+        if not hasattr(self, 'bubble_outline_width'): self.bubble_outline_width = 3.0
+        if not hasattr(self, 'alignment'): self.alignment = 'center'
+        if not hasattr(self, 'line_spacing') or self.line_spacing is None: self.line_spacing = 1.1
+        if not hasattr(self, 'char_spacing') or self.char_spacing is None: self.char_spacing = 100.0
+        if 'letterSpacing' not in self.font_info:
+            self.font_info['letterSpacing'] = self.char_spacing
+            self.font_info['letterSpacingType'] = QFont.PercentageSpacing
+        if not getattr(self, 'margins', None): self.margins = {'top': 12, 'right': 12, 'bottom': 12, 'left': 12}
+        if not getattr(self, 'text_segments', None):
+            self.text_segments = self._build_segments_from_plain(self.text, self.get_font(), self.get_color())
+        if not getattr(self, 'text', None):
+            self.text = self._segments_to_plain_text(self.text_segments)
+
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.ensure_defaults()
 
     @staticmethod
     def font_to_dict(font):
-        return {'family': font.family(), 'pointSize': font.pointSize(), 'weight': font.weight(), 'italic': font.italic()}
+        return {
+            'family': font.family(),
+            'pointSize': font.pointSizeF() if hasattr(font, 'pointSizeF') else font.pointSize(),
+            'weight': font.weight(),
+            'italic': font.italic(),
+            'underline': font.underline(),
+            'letterSpacing': font.letterSpacing(),
+            'letterSpacingType': font.letterSpacingType(),
+        }
 
     def get_font(self):
         font = QFont()
-        font.setFamily(self.font_info['family'])
-        font.setPointSize(self.font_info['pointSize'])
-        font.setWeight(self.font_info['weight'])
-        font.setItalic(self.font_info['italic'])
+        info = self.font_info
+        font.setFamily(info.get('family', 'Arial'))
+        point_size = info.get('pointSize', 14)
+        font.setPointSizeF(point_size)
+        font.setWeight(info.get('weight', QFont.Normal))
+        font.setItalic(info.get('italic', False))
+        font.setUnderline(info.get('underline', False))
+        font.setLetterSpacing(QFont.PercentageSpacing, self.char_spacing or 100.0)
         return font
 
     def get_color(self):
         return QColor(self.color_info)
+
+    def segment_to_qfont(self, segment):
+        info = segment.get('font', self.font_info)
+        font = QFont()
+        font.setFamily(info.get('family', self.font_info.get('family', 'Arial')))
+        font.setPointSizeF(info.get('pointSize', self.font_info.get('pointSize', 14)))
+        font.setWeight(info.get('weight', self.font_info.get('weight', QFont.Normal)))
+        font.setItalic(info.get('italic', self.font_info.get('italic', False)))
+        font.setUnderline(segment.get('underline', info.get('underline', False)))
+        spacing = info.get('letterSpacing', self.char_spacing or 100.0)
+        font.setLetterSpacing(info.get('letterSpacingType', QFont.PercentageSpacing), spacing)
+        return font
+
+    def segment_to_color(self, segment):
+        return QColor(segment.get('color', self.color_info))
+
+    def get_segments(self):
+        self.ensure_defaults()
+        return self.text_segments
+
+    def set_segments(self, segments):
+        self.text_segments = segments or []
+        self.text = self._segments_to_plain_text(self.text_segments)
+
+    def get_orientation(self):
+        return getattr(self, 'orientation', 'horizontal') or 'horizontal'
+
+    def get_effect(self):
+        return getattr(self, 'effect', 'none') or 'none'
+
+    def get_effect_intensity(self):
+        try:
+            return float(getattr(self, 'effect_intensity', 20.0) or 20.0)
+        except (TypeError, ValueError):
+            return 20.0
+
+    def get_bezier_points(self):
+        self.ensure_defaults()
+        return self.bezier_points
+
+    def get_bubble_fill_color(self):
+        return QColor(getattr(self, 'bubble_fill', '#ffffff'))
+
+    def get_bubble_outline_color(self):
+        return QColor(getattr(self, 'bubble_outline', '#000000'))
+
+    def get_alignment(self):
+        return getattr(self, 'alignment', 'center') or 'center'
+
+    def get_line_spacing(self):
+        try:
+            val = float(getattr(self, 'line_spacing', 1.1) or 1.1)
+            return max(0.6, min(val, 5.0))
+        except (TypeError, ValueError):
+            return 1.1
+
+    def get_char_spacing(self):
+        try:
+            val = float(getattr(self, 'char_spacing', 100.0) or 100.0)
+            return max(10.0, min(val, 500.0))
+        except (TypeError, ValueError):
+            return 100.0
+
+    def get_margins(self):
+        margins = getattr(self, 'margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
+        for key in ('top', 'right', 'bottom', 'left'):
+            if key not in margins:
+                margins[key] = 12
+        return margins
+
+    def _build_segments_from_plain(self, text, font, color):
+        segment = {
+            'text': text or '',
+            'font': self.font_to_dict(font),
+            'color': color.name(),
+            'underline': font.underline(),
+        }
+        return [segment]
+
+    def _segments_to_plain_text(self, segments):
+        if not segments:
+            return ''
+        return ''.join(seg.get('text', '') for seg in segments)
 
 class SelectableImageLabel(QLabel):
     areaDoubleClicked = pyqtSignal(TypesetArea)
@@ -1657,6 +2185,10 @@ class MangaOCRApp(QMainWindow):
         self.cancel_button = QPushButton("Cancel"); self.cancel_button.clicked.connect(self.cancel_pen_selection); self.cancel_button.setVisible(False)
         pen_buttons_layout.addWidget(self.confirm_button); pen_buttons_layout.addWidget(self.cancel_button)
         selection_layout.addLayout(pen_buttons_layout, 1, 0, 1, 2)
+
+        self.create_bubble_checkbox = QCheckBox("Create white bubble with black outline")
+        self.create_bubble_checkbox.setToolTip("When enabled, confirmed selections will render a bubble background behind the text.")
+        selection_layout.addWidget(self.create_bubble_checkbox, 2, 0, 1, 2)
         layout.addWidget(selection_group)
         
         # [DIUBAH] Inpainting Group dengan model baru
@@ -2787,6 +3319,15 @@ class MangaOCRApp(QMainWindow):
             # Optimasi CPU
             'cpu_threads': 4,  # Sesuaikan dengan jumlah core CPU Anda
             'enable_mkldnn': True,  # Optimasi untuk CPU Intel
+            'orientation_mode': 'vertical' if self.vertical_typeset_checkbox.isChecked() else 'horizontal',
+            'create_bubble': getattr(self, 'create_bubble_checkbox', None) and self.create_bubble_checkbox.isChecked(),
+            'text_effect': 'none',
+            'effect_intensity': 20.0,
+            'bezier_points': None,
+            'alignment': 'center',
+            'line_spacing': 1.1,
+            'char_spacing': 100.0,
+            'margins': {'top': 0, 'right': 0, 'bottom': 0, 'left': 0},
         }
 
     def update_gpu_status_label(self):
@@ -3621,39 +4162,304 @@ class MangaOCRApp(QMainWindow):
             painter.fillRect(painter.window(), background_color)
             painter.restore()
         
-        # 6. GAMBAR TEKS HASIL TRANSLASI
+        # 6. Render optional bubble and stylised text
+        if getattr(area, 'bubble_enabled', False):
+            painter.save()
+            self.draw_area_bubble(painter, area)
+            painter.restore()
+
         painter.save()
-        is_vertical = self.vertical_typeset_checkbox.isChecked()
-        self.draw_text_with_options(painter, area.rect, area.text, area.get_font(), area.get_color(), is_vertical)
+        self.draw_area_text(painter, area)
         painter.restore()
 
-    def draw_text_with_options(self, painter, rect, text, font, color, is_vertical=False):
-        if is_vertical: self.draw_rotated_vertical_text(painter, rect, text, font, color); return
-        margin_x = int(rect.width() * 0.05); margin_y = int(rect.height() * 0.05)
-        inner_rect = rect.adjusted(margin_x, margin_y, -margin_x, -margin_y)
-        if inner_rect.width() <= 0 or inner_rect.height() <= 0: return
-        current_font = QFont(font)
-        low, high, best_size = 6, 200, 6
-        while low <= high:
-            mid = (low + high) // 2; current_font.setPointSizeF(mid); painter.setFont(current_font)
-            bounding_rect = painter.boundingRect(inner_rect, Qt.TextWordWrap, text)
-            if bounding_rect.height() <= inner_rect.height() and bounding_rect.width() <= inner_rect.width():
-                best_size = mid; low = mid + 1
-            else: high = mid - 1
-        current_font.setPointSizeF(best_size); painter.setFont(current_font)
-        outline_color = Qt.white if color.value() < 128 else Qt.black
-        painter.setPen(outline_color)
-        for dx, dy in [(-1,-1), (1,-1), (-1,1), (1,1), (-2,0), (2,0), (0,-2), (0,2)]:
-            painter.drawText(inner_rect.translated(dx, dy), Qt.AlignCenter | Qt.TextWordWrap, text)
-        painter.setPen(color)
-        painter.drawText(inner_rect, Qt.AlignCenter | Qt.TextWordWrap, text)
+    def draw_area_bubble(self, painter, area):
+        path = QPainterPath()
+        if getattr(area, 'polygon', None):
+            path.addPolygon(QPolygonF(area.polygon))
+        else:
+            rect = QRectF(area.rect)
+            radius = max(8.0, min(rect.width(), rect.height()) * 0.18)
+            path.addRoundedRect(rect, radius, radius)
 
-    def draw_rotated_vertical_text(self, painter, rect, text, font, color):
-        painter.save(); center = rect.center()
-        painter.translate(center.x(), center.y()); painter.rotate(90); painter.translate(-center.x(), -center.y())
-        rotated_rect = QRect(0, 0, rect.height(), rect.width()); rotated_rect.moveCenter(rect.center())
-        self.draw_text_with_options(painter, rotated_rect, text, font, color, is_vertical=False)
-        painter.restore()
+        painter.setBrush(QBrush(area.get_bubble_fill_color()))
+        outline_width = max(1.0, float(getattr(area, 'bubble_outline_width', 3.0) or 3.0))
+        painter.setPen(QPen(area.get_bubble_outline_color(), outline_width))
+        painter.drawPath(path)
+
+    def draw_area_text(self, painter, area):
+        rect = QRectF(area.rect)
+        margins = area.get_margins()
+        rect = rect.adjusted(margins['left'], margins['top'], -margins['right'], -margins['bottom'])
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        effect = area.get_effect().lower()
+        orientation = area.get_orientation()
+
+        if orientation == 'vertical' and effect != 'none':
+            effect = 'none'
+
+        if effect == 'none':
+            self._draw_rich_text_document(painter, rect, area, orientation)
+        else:
+            self._draw_effect_text(painter, rect, area, effect)
+
+    def _create_document_from_segments(self, area):
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        option = doc.defaultTextOption()
+        align_map = {
+            'center': Qt.AlignHCenter,
+            'left': Qt.AlignLeft,
+            'right': Qt.AlignRight,
+            'justify': Qt.AlignJustify,
+        }
+        option.setAlignment(align_map.get(area.get_alignment(), Qt.AlignHCenter))
+        doc.setDefaultTextOption(option)
+
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.Start)
+        line_spacing = max(0.6, area.get_line_spacing())
+        block_format = QTextBlockFormat()
+        block_format.setLineHeight(int(line_spacing * 100), QTextBlockFormat.ProportionalHeight)
+        block_format.setAlignment(option.alignment())
+        cursor.setBlockFormat(block_format)
+
+        first_segment = True
+        for segment in area.get_segments():
+            text_value = segment.get('text', '')
+            if not text_value:
+                continue
+            fmt = QTextCharFormat()
+            seg_font = area.segment_to_qfont(segment)
+            fmt.setFont(seg_font)
+            fmt.setForeground(QBrush(area.segment_to_color(segment)))
+            if segment.get('underline', False):
+                fmt.setFontUnderline(True)
+
+            parts = text_value.split('\n')
+            for idx, part in enumerate(parts):
+                if not first_segment:
+                    cursor.mergeBlockFormat(block_format)
+                cursor.insertText(part, fmt)
+                first_segment = False
+                if idx < len(parts) - 1:
+                    cursor.insertBlock(block_format)
+                    cursor.setBlockFormat(block_format)
+
+        return doc
+
+    def _draw_rich_text_document(self, painter, rect, area, orientation):
+        doc = self._create_document_from_segments(area)
+        if doc.isEmpty():
+            return
+
+        target_width = rect.height() if orientation == 'vertical' else rect.width()
+        doc.setTextWidth(max(1.0, target_width))
+        doc_size = doc.size()
+        if doc_size.isEmpty():
+            return
+
+        image_width = max(1, int(math.ceil(doc_size.width())))
+        image_height = max(1, int(math.ceil(doc_size.height())))
+        image = QImage(image_width, image_height, QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        doc_painter = QPainter(image)
+        doc.drawContents(doc_painter)
+        doc_painter.end()
+
+        if orientation == 'vertical':
+            scale_w = rect.width() / image_height if image_height else 1.0
+            scale_h = rect.height() / image_width if image_width else 1.0
+        else:
+            scale_w = rect.width() / image_width if image_width else 1.0
+            scale_h = rect.height() / image_height if image_height else 1.0
+        scale = min(scale_w, scale_h)
+
+        painter.translate(rect.center())
+        if orientation == 'vertical':
+            painter.rotate(90)
+        painter.scale(scale, scale)
+        painter.translate(-image_width / 2, -image_height / 2)
+        painter.drawImage(0, 0, image)
+
+    def _flatten_segments_to_lines(self, area):
+        lines = []
+        current_line = []
+        for segment in area.get_segments():
+            text = segment.get('text', '')
+            if text is None:
+                continue
+            base_font = area.segment_to_qfont(segment)
+            base_color = area.segment_to_color(segment)
+            underline = segment.get('underline', base_font.underline())
+            for char in text:
+                if char == '\n':
+                    lines.append(current_line)
+                    current_line = []
+                    continue
+                glyph_font = QFont(base_font)
+                glyph_font.setUnderline(underline)
+                glyph_font.setLetterSpacing(QFont.PercentageSpacing, area.get_char_spacing())
+                current_line.append({'char': char, 'font': glyph_font, 'color': QColor(base_color)})
+        lines.append(current_line)
+        return [line for line in lines if line]
+
+    def _compute_line_metrics(self, lines, area):
+        metrics = []
+        for glyphs in lines:
+            if not glyphs:
+                base_font = area.get_font()
+                fm = QFontMetrics(base_font)
+                metrics.append({'ascent': fm.ascent(), 'descent': fm.descent(), 'height': (fm.ascent() + fm.descent()) * area.get_line_spacing()})
+                continue
+            ascents = [QFontMetrics(g['font']).ascent() for g in glyphs]
+            descents = [QFontMetrics(g['font']).descent() for g in glyphs]
+            ascent = max(ascents) if ascents else 0.0
+            descent = max(descents) if descents else 0.0
+            metrics.append({'ascent': ascent, 'descent': descent, 'height': (ascent + descent) * area.get_line_spacing()})
+        return metrics
+
+    def _draw_effect_text(self, painter, rect, area, effect):
+        lines = self._flatten_segments_to_lines(area)
+        if not lines:
+            return
+
+        metrics = self._compute_line_metrics(lines, area)
+        total_height = sum(m['height'] for m in metrics)
+        y_offset = rect.top() + max(0.0, (rect.height() - total_height) / 2.0)
+        alignment = area.get_alignment()
+        baseline = y_offset + (metrics[0]['ascent'] if metrics else 0.0)
+        intensity = area.get_effect_intensity()
+
+        for index, glyphs in enumerate(lines):
+            if not glyphs:
+                baseline += metrics[index]['height']
+                continue
+            if effect == 'curved':
+                self._draw_curved_line(painter, rect, glyphs, area, index, len(lines), intensity)
+            elif effect == 'wavy':
+                self._draw_wavy_line(painter, rect, glyphs, baseline, intensity, alignment)
+            elif effect == 'jagged':
+                self._draw_jagged_line(painter, rect, glyphs, baseline, intensity, alignment)
+            baseline += metrics[index]['height']
+
+    def _draw_curved_line(self, painter, rect, glyphs, area, line_index, total_lines, intensity):
+        total_width = sum(QFontMetrics(g['font']).horizontalAdvance(g['char']) for g in glyphs)
+        if total_width <= 0:
+            return
+
+        offset_ratio = 0.0
+        if total_lines > 1:
+            offset_ratio = (line_index - (total_lines - 1) / 2.0) / max(1, total_lines - 1)
+        center_y = rect.center().y() + offset_ratio * rect.height() * 0.2
+        intensity_factor = max(0.0, min(intensity / 50.0, 5.0))
+        bezier_points = area.get_bezier_points()
+
+        def scale_point(point):
+            px = rect.left() + rect.width() * point.get('x', 0.5)
+            base_y = rect.top() + rect.height() * point.get('y', 0.5)
+            blended_y = center_y + (base_y - center_y) * intensity_factor
+            return QPointF(px, blended_y)
+
+        p0 = QPointF(rect.left(), center_y)
+        p3 = QPointF(rect.right(), center_y)
+        cp1 = scale_point(bezier_points[0]) if len(bezier_points) > 0 else QPointF(rect.left() + rect.width() * 0.3, center_y - rect.height() * 0.2)
+        cp2 = scale_point(bezier_points[1]) if len(bezier_points) > 1 else QPointF(rect.left() + rect.width() * 0.7, center_y - rect.height() * 0.2)
+
+        progress = 0.0
+        for glyph in glyphs:
+            fm = QFontMetrics(glyph['font'])
+            advance = fm.horizontalAdvance(glyph['char'])
+            if advance <= 0:
+                continue
+            t_mid = min(1.0, max(0.0, (progress + advance / 2.0) / total_width))
+            point = self._evaluate_cubic_bezier(t_mid, p0, cp1, cp2, p3)
+            tangent = self._bezier_tangent(t_mid, p0, cp1, cp2, p3)
+            angle = math.degrees(math.atan2(tangent.y(), tangent.x())) if (tangent.x() or tangent.y()) else 0.0
+
+            painter.save()
+            painter.translate(point)
+            painter.rotate(angle)
+            painter.setFont(glyph['font'])
+            painter.setPen(QPen(glyph['color']))
+            painter.drawText(QPointF(-advance / 2.0, 0), glyph['char'])
+            painter.restore()
+
+            progress += advance
+
+    def _draw_wavy_line(self, painter, rect, glyphs, baseline, intensity, alignment):
+        total_width = sum(QFontMetrics(g['font']).horizontalAdvance(g['char']) for g in glyphs)
+        if total_width <= 0:
+            return
+
+        if alignment == 'left':
+            start_x = rect.left()
+        elif alignment == 'right':
+            start_x = rect.right() - total_width
+        else:
+            start_x = rect.left() + (rect.width() - total_width) / 2.0
+
+        amplitude = min(rect.height() * 0.3, max(2.0, intensity))
+        frequency = (2.0 * math.pi) / max(total_width, 1.0)
+
+        current_x = start_x
+        for glyph in glyphs:
+            fm = QFontMetrics(glyph['font'])
+            advance = fm.horizontalAdvance(glyph['char'])
+            if advance <= 0:
+                continue
+            mid_x = current_x + advance / 2.0
+            wave_offset = math.sin(mid_x * frequency) * amplitude
+            painter.save()
+            painter.setFont(glyph['font'])
+            painter.setPen(QPen(glyph['color']))
+            painter.drawText(QPointF(current_x, baseline + wave_offset), glyph['char'])
+            painter.restore()
+            current_x += advance
+
+    def _draw_jagged_line(self, painter, rect, glyphs, baseline, intensity, alignment):
+        total_width = sum(QFontMetrics(g['font']).horizontalAdvance(g['char']) for g in glyphs)
+        if total_width <= 0:
+            return
+
+        if alignment == 'left':
+            start_x = rect.left()
+        elif alignment == 'right':
+            start_x = rect.right() - total_width
+        else:
+            start_x = rect.left() + (rect.width() - total_width) / 2.0
+
+        amplitude = min(rect.height() * 0.4, max(4.0, intensity * 1.2))
+        current_x = start_x
+        for idx, glyph in enumerate(glyphs):
+            fm = QFontMetrics(glyph['font'])
+            advance = fm.horizontalAdvance(glyph['char'])
+            if advance <= 0:
+                continue
+            offset = amplitude if idx % 2 == 0 else -amplitude
+            painter.save()
+            painter.translate(current_x, baseline + offset)
+            painter.rotate(10 if idx % 2 == 0 else -10)
+            bold_font = QFont(glyph['font'])
+            bold_font.setWeight(max(bold_font.weight(), QFont.Black))
+            painter.setFont(bold_font)
+            painter.setPen(QPen(glyph['color']))
+            painter.drawText(QPointF(0, 0), glyph['char'])
+            painter.restore()
+            current_x += advance
+
+    def _evaluate_cubic_bezier(self, t, p0, p1, p2, p3):
+        s = 1.0 - t
+        x = (s ** 3) * p0.x() + 3 * (s ** 2) * t * p1.x() + 3 * s * (t ** 2) * p2.x() + (t ** 3) * p3.x()
+        y = (s ** 3) * p0.y() + 3 * (s ** 2) * t * p1.y() + 3 * s * (t ** 2) * p2.y() + (t ** 3) * p3.y()
+        return QPointF(x, y)
+
+    def _bezier_tangent(self, t, p0, p1, p2, p3):
+        s = 1.0 - t
+        dx = 3 * (s ** 2) * (p1.x() - p0.x()) + 6 * s * t * (p2.x() - p1.x()) + 3 * (t ** 2) * (p3.x() - p2.x())
+        dy = 3 * (s ** 2) * (p1.y() - p0.y()) + 6 * s * t * (p2.y() - p1.y()) + 3 * (t ** 2) * (p3.y() - p2.y())
+        return QPointF(dx, dy)
 
     def selection_mode_changed(self, mode):
         self.image_label.clear_selection()
@@ -3781,15 +4587,34 @@ class MangaOCRApp(QMainWindow):
         if not area:
             return
 
-        dialog = TextEditDialog(area, parent=self)
+        dialog = AdvancedTextEditDialog(area, parent=self)
         if dialog.exec_() == QDialog.Accepted:
-            new_text = dialog.get_text()
-            if new_text != area.text:
-                area.text = new_text
-                self.redo_stack.clear()
-                self.redraw_all_typeset_areas()
-                self.update_undo_redo_buttons_state()
-                self.statusBar().showMessage("Text updated", 2000)
+            result = dialog.get_result()
+            if not result:
+                return
+
+            area.set_segments(result.get('segments', []))
+            area.text = result.get('plain_text', area.text)
+            area.orientation = result.get('orientation', area.get_orientation())
+            area.effect = result.get('effect', area.get_effect())
+            area.effect_intensity = result.get('effect_intensity', area.get_effect_intensity())
+            area.bezier_points = result.get('bezier_points', area.get_bezier_points())
+            area.bubble_enabled = result.get('bubble_enabled', area.bubble_enabled)
+            area.alignment = result.get('alignment', area.get_alignment())
+            area.line_spacing = result.get('line_spacing', area.get_line_spacing())
+            area.char_spacing = result.get('char_spacing', area.get_char_spacing())
+            area.margins = result.get('margins', area.get_margins())
+
+            first_segment = next((seg for seg in area.get_segments() if seg.get('text', '').strip()), None)
+            if first_segment:
+                area.font_info = first_segment.get('font', area.font_info)
+                area.color_info = first_segment.get('color', area.color_info)
+
+            area.ensure_defaults()
+            self.redo_stack.clear()
+            self.redraw_all_typeset_areas()
+            self.update_undo_redo_buttons_state()
+            self.statusBar().showMessage("Text updated", 2000)
 
     def zoom_coords(self, unzoomed_rect):
         pixmap = self.image_label.pixmap()
