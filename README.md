@@ -1,18 +1,27 @@
-# Manga OCR & Typeset Tool v13.0.1
+# Manga OCR & Typeset Tool v14.0.1
 
-[![Version](https://img.shields.io/badge/version-13.0.1-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
-
----
-
-## Ringkasan
-
-Aplikasi desktop canggih untuk OCR, terjemahan, dan typesetting teks pada manga/komik dengan dukungan AI. Mendukung multi-engine OCR (Manga-OCR, EasyOCR, Tesseract, PaddleOCR), koreksi dan terjemahan AI (Gemini), serta sistem glosarium pintar.
-
-Versi **13.0.1** memperkenalkan sistem worker pool yang dinamis, sistem glosarium berbasis AI, dan perbaikan stabilitas.
+[![Version](https://img.shields.io/badge/version-14.0.1-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
 ---
 
-## Pipeline Detail: Manga OCR & Typeset Tool v13.0.1
+## v14.0.1 (Current)
+
+- **[MAJOR]** Added an “Add bubble” toggle in the manual selection toolkit to optionally auto-render a white bubble with a black outline on confirmation  
+- **[MAJOR]** Replaced inline editor with **AdvancedTextEditDialog**, supporting font/size/color controls, bold/italic/underline, alignment, line spacing, character spacing, margins, Bezier curve editing, manga-style effects (curved/wavy/jagged), orientation switching, and emoji insertion with partial text styling  
+- **[IMPROVEMENT]** Expanded `TypesetArea` to persist rich formatting metadata including bubble options, alignment, spacing, margins, effects, and per-segment styling with safe default fallbacks  
+- **[IMPROVEMENT]** Reworked the rendering pipeline to honor bubbles, inner margins, alignment, vertical/path-based text effects, and rich-text segments  
+- **[IMPROVEMENT]** Updated OCR worker flows to seed new `TypesetArea` instances with default advanced-layout options across batch and single-processing  
+- **[FIX]** Hooked edit actions into the new modal, applying user selections back into stored segments and resetting undo/redo cleanly  
+
+## v14.0.0
+
+- **[IMPROVEMENT]** Modernized UI/UX to be responsive and adaptive across all screen sizes (desktop, tablet, mobile), ensuring smooth navigation and consistent layout  
+- **[MAJOR]** Added a simple text editing modal: when users select an existing text, a modal window opens to edit text content directly, and after confirmation updates are applied back to the canvas  
+- **[MAJOR]** Added a new **AI Hardware** tab to organize and display hardware-related settings separately from the OCR and editing functions
+
+---
+
+## Pipeline Detail: Manga OCR & Typeset Tool v14.0.1
 
 Berikut adalah **pipeline detail** untuk alur sistem yang telah ditingkatkan:
 
@@ -116,73 +125,58 @@ flowchart LR
 ## Fitur Utama
 
 ### 1. OCR Multi-Engine Cerdas
-
-- **Manga-OCR** - Dioptimalkan untuk teks manga Jepang
-- **EasyOCR** - Deteksi multi-bahasa dengan dukungan GPU
-- **Tesseract** - Engine tradisional dengan dukungan bahasa luas
-- **PaddleOCR** - Khusus untuk bahasa China/Korea (opsional)
-- **Deteksi Orientasi Otomatis** dengan rotasi korektif
+- **Manga-OCR** – Dioptimalkan untuk teks manga Jepang  
+- **EasyOCR** – Deteksi multi-bahasa dengan dukungan GPU  
+- **Tesseract** – Engine tradisional dengan dukungan bahasa luas  
+- **PaddleOCR** – Khusus untuk bahasa China/Korea (opsional)  
+- **Deteksi Orientasi Otomatis** dengan rotasi korektif  
 
 ### 2. AI-Powered Translation & Enhancement
+- **Gemini Integration** untuk koreksi OCR dan terjemahan kontekstual  
+- **Enhanced Pipeline** dengan kombinasi Manga-OCR + Tesseract + Gemini  
+- **Style Selection**: Santai, Formal, Akrab, Vulgar/Dewasa, Sesuai Konteks Manga  
+- **Auto-censorship** untuk konten eksplisit ("vagina" → "meong", "penis" → "burung")  
 
-- **Gemini Integration** untuk koreksi OCR dan terjemahan kontekstual
-- **Enhanced Pipeline** kombinasi Manga-OCR + Tesseract + Gemini
-- **Style Selection**: Santai, Formal, Akrab, Vulgar/Dewasa, Sesuai Konteks Manga
-- **Auto-censorship** untuk konten eksplisit ("vagina" → "meong", "penis" → "burung")
+### 3. Dynamic Worker Pool
+- **Scalable Processing** – Hingga 15 worker thread paralel  
+- **Intelligent Scaling** – Worker baru dibuat berdasarkan ukuran antrian  
+- **Resource Management** – Worker otomatis dihentikan saat idle  
+- **Thread-safe UI Updates** – Pembaruan antarmuka yang aman dari thread  
 
-### 3. Intelligent Glossary System
+### 4. Advanced Typesetting Tools
+- **Selection Tools**: Rectangle, Pen tool (polygon bebas), opsi bubble toggle  
+- **Advanced Text Editor Modal** – Kontrol font, ukuran, warna, alignment, spacing, margin, efek manga-style (curved, wavy, jagged), Bezier curve untuk teks melengkung, serta emoji  
+- **Vertical & Horizontal Typesetting** – Dukungan orientasi teks ganda  
+- **Inpainting Algorithms** – Navier-Stokes, Telea, dan Big-LAMA/Anime-Inpainting yang lebih natural  
 
-- **AI-Powered Suggestion** - Gemini menganalisis teks untuk menyarankan istilah penting
-- **Glossary Manager** - UI khusus dengan tambah/edit/hapus entri
-- **File-based Persistence** - Disimpan sebagai `glossary.json` dalam folder proyek
-- **Real-time Integration** - Glosarium langsung terintegrasi dalam prompt terjemahan
+### 5. Manajemen Proyek Lengkap
+- **Save/Load Project** (`.manga_proj`) dengan semua metadata  
+- **Autosave** setiap 5 menit  
+- **Batch Processing** – Proses seluruh folder sekaligus  
+- **PDF Support** – Buka, edit, dan ekspor PDF  
 
-### 4. Dynamic Worker Pool
-
-- **Scalable Processing** - Hingga 15 worker thread paralel
-- **Intelligent Scaling** - Worker baru dibuat berdasarkan ukuran antrian
-- **Resource Management** - Worker otomatis dihentikan saat idle
-- **Thread-safe UI Updates** - Pembaruan antarmuka yang aman dari thread
-
-### 5. Advanced Typesetting Tools
-
-- **Selection Tools**: Rectangle, Pen tool (polygon bebas)
-- **Inline Editor** - Edit teks langsung pada gambar
-- **Vertical Typesetting** - Dukungan untuk teks vertikal
-- **Bubble Detection** - Deteksi otomatis balon teks dengan model DL
-- **Inpainting Algorithms** - Navier-Stokes dan Telea
-
-### 6. Manajemen Proyek Lengkap
-
-- **Save/Load Project** (`.manga_proj`) dengan semua metadata
-- **Autosave** setiap 5 menit
-- **Batch Processing** - Proses seluruh folder
-- **PDF Support** - Buka, edit, dan ekspor PDF
-
-### 7. API & Resource Management
-
-- **Multi-API Support** - Gemini (berbagai model) dan DeepL
-- **Rate Limit Management** - Monitoring RPM/RPD real-time
-- **Cost Tracking** - Pelacakan biaya API dalam USD dan IDR
-- **Automatic Retry** - Mekanisme antrian saat limit tercapai
+### 6. API & Resource Management
+- **Multi-API Support** – Gemini (berbagai model) dan DeepL  
+- **Rate Limit Management** – Monitoring RPM/RPD real-time  
+- **Cost Tracking** – Pelacakan biaya API dalam USD dan IDR  
+- **Automatic Retry** – Mekanisme antrian saat limit tercapai  
 
 ---
 
-## Kelebihan v13.0.1
+## Kelebihan v14.0.1
 
 **Kelebihan**
-
-- Performa drastically improved dengan worker pool dinamis
-- Akurasi terjemahan lebih tinggi dengan enhanced pipeline
-- Konsistensi terjemahan dengan sistem glosarium AI
-- Manajemen resource yang lebih efisien
-- UI yang lebih informatif dengan status real-time
+- UI/UX lebih modern dan responsif, adaptif di semua ukuran layar (desktop, tablet, mobile)  
+- Advanced text editor modal dengan kontrol font, warna, efek manga-style, dan styling per kata  
+- Toggle bubble opsional untuk auto-render bubble putih dengan outline hitam  
+- Worker pool dinamis yang lebih stabil dan efisien untuk pemrosesan batch besar  
+- Pipeline rendering diperbarui untuk mendukung margin, alignment, spacing, serta teks vertikal maupun efek path-based  
 
 **Pertimbangan**
-
-- Konsumsi memori lebih tinggi dengan banyak worker
-- Dependency complex (perlu GPU untuk performa optimal)
-- Biaya API mungkin meningkat dengan penggunaan intensif
+- Konsumsi memori meningkat jika banyak worker aktif dan rich text digunakan  
+- Dependency lebih kompleks, termasuk kebutuhan GPU untuk performa optimal pada EasyOCR/PaddleOCR  
+- Biaya API berpotensi lebih tinggi dengan penggunaan AI translation intensif  
+- Learning curve lebih tinggi karena fitur editing lebih advance dibanding versi sebelumnya  
 
 ---
 
@@ -223,6 +217,8 @@ google-generativeai>=0.3.0
 pytesseract>=0.3.10
 easyocr>=1.6
 PyMuPDF>=1.22
+openai>=1.0.0
+lama-cleaner>=1.0.0
 ```
 
 ---
@@ -233,11 +229,16 @@ File konfigurasi dibuat otomatis saat pertama kali menjalankan aplikasi:
 
 ```ini
 [API]
-DEEPL_KEY = YOUR_DEEPL_API_KEY_HERE
-GEMINI_KEY = YOUR_GEMINI_API_KEY_HERE
+DEEPL_KEY = API-KEY
+GEMINI_KEY = API-KEY
+OPENAI_KEY = API-KEY
 
 [PATHS]
 TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
+
+[MODELS]
+BIG_LAMA_PATH = big-lama\models\best.ckpt
+ANIME_INPAINT_PATH = models\lama_large_512px.ckpt
 ```
 
 **Catatan**: Ganti placeholder dengan API key sebenarnya untuk menggunakan fitur AI.
@@ -340,7 +341,22 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 
 # Changelog
 
-## v13.0.1 (Current)
+## v14.0.1 (Current)
+
+- **[MAJOR]** Added an “Add bubble” toggle in the manual selection toolkit to optionally auto-render a white bubble with a black outline on confirmation  
+- **[MAJOR]** Replaced inline editor with **AdvancedTextEditDialog**, supporting font/size/color controls, bold/italic/underline, alignment, line spacing, character spacing, margins, Bezier curve editing, manga-style effects (curved/wavy/jagged), orientation switching, and emoji insertion with partial text styling  
+- **[IMPROVEMENT]** Expanded `TypesetArea` to persist rich formatting metadata including bubble options, alignment, spacing, margins, effects, and per-segment styling with safe default fallbacks  
+- **[IMPROVEMENT]** Reworked the rendering pipeline to honor bubbles, inner margins, alignment, vertical/path-based text effects, and rich-text segments  
+- **[IMPROVEMENT]** Updated OCR worker flows to seed new `TypesetArea` instances with default advanced-layout options across batch and single-processing  
+- **[FIX]** Hooked edit actions into the new modal, applying user selections back into stored segments and resetting undo/redo cleanly  
+
+## vv14.0.0
+
+- **[IMPROVEMENT]** Modernized UI/UX to be responsive and adaptive across all screen sizes (desktop, tablet, mobile), ensuring smooth navigation and consistent layout  
+- **[MAJOR]** Added a simple text editing modal: when users select an existing text, a modal window opens to edit text content directly, and after confirmation updates are applied back to the canvas  
+- **[MAJOR]** Added a new **AI Hardware** tab to organize and display hardware-related settings separately from the OCR and editing functions
+
+## v13.0.1
 
 - **[FIX]** Runtime crash dalam worker glossary (`RuntimeError: wrapped C/C++ object of type QThread has been deleted`)
 - **[IMPROVEMENT]** Worker pool scaling yang lebih agresif (threshold diturunkan dari 5 ke 3)
@@ -375,3 +391,4 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 ---
 
 Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
+
