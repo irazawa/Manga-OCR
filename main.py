@@ -1,4 +1,4 @@
-# Manga OCR & Typeset Tool v16.1.0
+﻿# Manga OCR & Typeset Tool v16.1.0
 # ==============================
 # 📦 Import modul bawaan Python
 # ==============================
@@ -40,7 +40,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QWidget, QFileDialog, QTextEdit, QScrollArea, QComboBox, QMessageBox,
     QProgressBar, QShortcut, QListWidget, QListWidgetItem, QColorDialog, QFontDialog,
-    QLineEdit, QAction, QDialog, QCheckBox, QStatusBar, QAbstractItemView, QSpinBox,
+    QLineEdit, QAction, QDialog, QDialogButtonBox, QCheckBox, QStatusBar, QAbstractItemView, QSpinBox,
     QTabWidget, QGroupBox, QGridLayout, QFrame, QSplitter, QRadioButton
 )
 from PyQt5.QtGui import (
@@ -696,6 +696,38 @@ class ReviewDialog(QDialog):
     def get_text(self):
         return self.text_edit.toPlainText()
 
+
+class TextEditDialog(QDialog):
+    """Modal dialog that lets users fine-tune existing typeset text."""
+
+    def __init__(self, area, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Text")
+        self.setModal(True)
+        self.resize(460, 260)
+
+        layout = QVBoxLayout(self)
+        header = QLabel("Update the selected text. Changes apply once you press Apply.")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(area.text)
+        self.text_edit.setFont(area.get_font())
+        self.text_edit.setMinimumHeight(140)
+        self.text_edit.selectAll()
+        layout.addWidget(self.text_edit)
+        self.text_edit.setFocus()
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        button_box.button(QDialogButtonBox.Save).setText("Apply")
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def get_text(self):
+        return self.text_edit.toPlainText()
+
 class TypesetArea:
     def __init__(self, rect, text, font, color, polygon=None):
         self.rect = rect
@@ -1056,36 +1088,165 @@ class SelectableImageLabel(QLabel):
 
 class MangaOCRApp(QMainWindow):
     DARK_THEME_STYLESHEET = """
-        QMainWindow, QDialog { background-color: #2e2e2e; }
-        QMenuBar { background-color: #3c3c3c; color: #f0f0f0; }
-        QMenuBar::item:selected { background-color: #007acc; }
-        QMenu { background-color: #3c3c3c; color: #f0f0f0; border: 1px solid #555; }
-        QMenu::item:selected { background-color: #007acc; }
-        QWidget { color: #f0f0f0; background-color: #2e2e2e; font-size: 10pt; }
-        QLabel { padding: 2px; background-color: transparent; }
-        QLabel#h3 { color: #55aaff; font-size: 12pt; font-weight: bold; margin-top: 10px; border-bottom: 1px solid #444; padding-bottom: 4px; }
-        QPushButton { background-color: #007acc; color: white; padding: 8px; border: 1px solid #005f9e; border-radius: 4px; margin: 2px; }
-        QPushButton:hover { background-color: #008ae6; }
-        QPushButton:pressed { background-color: #005f9e; }
-        QPushButton:disabled { background-color: #555555; border-color: #444; color: #999; }
-        QTextEdit, QComboBox, QListWidget, QLineEdit, QSpinBox, QRadioButton, QCheckBox { background-color: #3c3c3c; color: #f0f0f0; border: 1px solid #555; padding: 5px; border-radius: 4px; }
-        QCheckBox::indicator { width: 15px; height: 15px; }
-        QCheckBox::indicator:unchecked { border: 1px solid #555; background-color: #3c3c3c; }
-        QCheckBox::indicator:checked { background-color: #007acc; border: 1px solid #005f9e; image: url(none); } /* Hide default checkmark */
-        QListWidget::item { padding: 5px; }
-        QListWidget::item:selected { background-color: #007acc; }
-        QScrollArea { border: none; }
-        QProgressBar { border: 1px solid #555; border-radius: 4px; text-align: center; color: #f0f0f0; }
-        QProgressBar::chunk { background-color: #007acc; border-radius: 3px; }
-        QStatusBar { background-color: #252525; color: #f0f0f0; }
-        QGroupBox { border: 1px solid #444; border-radius: 6px; margin-top: 10px; padding: 10px; }
-        QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 5px; background-color: #2e2e2e; }
-        QTabWidget::pane { border: 1px solid #444; border-top: none; }
-        QTabBar::tab { background: #3c3c3c; color: #f0f0f0; padding: 10px 20px; border: 1px solid #444; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-        QTabBar::tab:selected { background: #2e2e2e; border-color: #444; color: #55aaff; }
-        QTabBar::tab:hover { background: #4a4a4a; }
-        QSplitter::handle { background-color: #444; }
-        QFrame[frameShape="5"] { color: #444; } /* VLine */
+        QMainWindow, QDialog {
+            background-color: #0f141b;
+            color: #f3f6fb;
+        }
+        QWidget {
+            background-color: #121a24;
+            color: #f3f6fb;
+            font-size: 10pt;
+            font-family: 'Segoe UI', 'Open Sans', sans-serif;
+        }
+        QLabel {
+            padding: 2px;
+            background-color: transparent;
+        }
+        QLabel#h3 {
+            color: #7faeff;
+            font-size: 12pt;
+            font-weight: 600;
+            margin-top: 10px;
+            border-bottom: 1px solid #1f2b3b;
+            padding-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+        QMenuBar {
+            background-color: #141e2a;
+            color: #f3f6fb;
+            border: none;
+        }
+        QMenuBar::item {
+            padding: 6px 12px;
+            margin: 0 2px;
+            border-radius: 4px;
+        }
+        QMenuBar::item:selected {
+            background-color: #1f88ff;
+        }
+        QMenu {
+            background-color: #152231;
+            color: #f3f6fb;
+            border: 1px solid #223347;
+            padding: 6px;
+        }
+        QMenu::item {
+            border-radius: 4px;
+            padding: 6px 12px;
+        }
+        QMenu::item:selected {
+            background-color: #1f88ff;
+        }
+        QPushButton {
+            background-color: #1f88ff;
+            color: #ffffff;
+            padding: 8px 14px;
+            border-radius: 6px;
+            border: none;
+            margin: 2px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background-color: #3a9bff;
+        }
+        QPushButton:pressed {
+            background-color: #186cd6;
+        }
+        QPushButton:disabled {
+            background-color: #253043;
+            color: #7c8a9d;
+        }
+        QTextEdit, QComboBox, QListWidget, QLineEdit, QSpinBox, QCheckBox, QRadioButton {
+            background-color: #172330;
+            border: 1px solid #1f2b3b;
+            border-radius: 6px;
+            padding: 6px 8px;
+            color: #f3f6fb;
+            selection-background-color: #1f88ff;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 26px;
+        }
+        QListWidget::item {
+            padding: 8px;
+            border-radius: 4px;
+        }
+        QListWidget::item:selected {
+            background-color: #1f88ff;
+            color: #ffffff;
+        }
+        QScrollArea, QScrollArea QWidget {
+            background: transparent;
+            border: none;
+        }
+        QGroupBox {
+            background-color: #141e2a;
+            border: 1px solid #1f2b3b;
+            border-radius: 10px;
+            margin-top: 14px;
+            padding: 14px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 16px;
+            padding: 0 8px;
+            color: #7faeff;
+            font-weight: 600;
+        }
+        QTabWidget::pane {
+            border: 1px solid #1f2b3b;
+            border-radius: 10px;
+            background-color: #121a24;
+            margin-top: 10px;
+        }
+        QTabBar::tab {
+            background: #141e2a;
+            color: #adbcd3;
+            padding: 10px 20px;
+            border: 1px solid transparent;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            margin-right: 4px;
+        }
+        QTabBar::tab:selected {
+            background: #1f88ff;
+            color: #ffffff;
+        }
+        QTabBar::tab:hover:!selected {
+            background: #1b2738;
+            color: #d4e2ff;
+        }
+        QProgressBar {
+            background-color: #1a2634;
+            border: 1px solid #1f2b3b;
+            border-radius: 6px;
+            height: 18px;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #1f88ff;
+            border-radius: 6px;
+        }
+        QStatusBar {
+            background-color: #101824;
+            color: #9cb4d0;
+            border-top: 1px solid #1f2b3b;
+        }
+        QSplitter::handle {
+            background-color: #1f2b3b;
+            margin: 0 6px;
+        }
+        QFrame[frameShape="5"] {
+            color: #1f2b3b;
+        }
+        QToolTip {
+            background-color: #1b2738;
+            color: #f3f6fb;
+            border: 1px solid #1f88ff;
+            padding: 6px 8px;
+        }
     """
     LIGHT_THEME_STYLESHEET = """
         /* TODO: Implement a light theme if needed */
@@ -1123,8 +1284,6 @@ class MangaOCRApp(QMainWindow):
         self.current_theme = 'dark'
         self.typeset_font = QFont("Arial", 12, QFont.Bold)
         self.typeset_color = QColor(Qt.black)
-        self.inline_editor = None
-        self.editing_area = None
 
         self.processing_queue = []
         self.queue_mutex = QMutex()
@@ -1280,6 +1439,7 @@ class MangaOCRApp(QMainWindow):
 
         # Left Panel (File List)
         left_panel_widget = QWidget()
+        left_panel_widget.setMinimumWidth(240)
         left_panel_layout = QVBoxLayout(left_panel_widget)
         left_panel_layout.setContentsMargins(10, 10, 10, 10)
         left_panel_layout.addWidget(QLabel("<h3>Image Files</h3>", objectName="h3"))
@@ -1325,14 +1485,26 @@ class MangaOCRApp(QMainWindow):
         splitter.addWidget(center_panel_widget)
 
         # Right Panel (Controls)
-        right_panel_widget = QWidget()
         right_panel_layout = self.setup_right_panel()
-        right_panel_widget.setLayout(right_panel_layout)
-        splitter.addWidget(right_panel_widget)
+        right_panel_content = QWidget()
+        right_panel_content.setObjectName("right-panel")
+        right_panel_content.setLayout(right_panel_layout)
 
-        # Set initial sizes for the splitter
-        splitter.setSizes([200, 700, 350])
+        self.right_panel_scroll = QScrollArea()
+        self.right_panel_scroll.setWidgetResizable(True)
+        self.right_panel_scroll.setFrameShape(QFrame.NoFrame)
+        self.right_panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.right_panel_scroll.setMinimumWidth(360)
+        self.right_panel_scroll.setWidget(right_panel_content)
+        splitter.addWidget(self.right_panel_scroll)
+
+        # Make splitter adaptive across screen sizes
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([260, 960, 420])
 
         main_layout.addWidget(splitter)
 
@@ -1341,11 +1513,15 @@ class MangaOCRApp(QMainWindow):
         main_layout.setContentsMargins(10,10,10,10)
 
         # Tabs for main functions
-        tabs = QTabWidget()
-        tabs.addTab(self._create_translate_tab(), "Translate")
-        tabs.addTab(self._create_cleanup_tab(), "Cleanup")
-        tabs.addTab(self._create_typeset_tab(), "Typeset")
-        main_layout.addWidget(tabs)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("main-tabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(False)
+        self.tabs.addTab(self._create_translate_tab(), "Translate")
+        self.tabs.addTab(self._create_cleanup_tab(), "Cleanup")
+        self.tabs.addTab(self._create_typeset_tab(), "Typeset")
+        self.tabs.addTab(self._create_ai_hardware_tab(), "AI Hardware")
+        main_layout.addWidget(self.tabs)
         main_layout.addStretch()
 
         # --- Bottom section for persistent controls ---
@@ -1443,51 +1619,6 @@ class MangaOCRApp(QMainWindow):
 
         layout.addWidget(ocr_group)
 
-        # AI Group
-        ai_group = QGroupBox("AI & Hardware")
-        ai_layout = QGridLayout(ai_group)
-        self.ai_model_combo = self._create_combo_box(ai_layout, "AI Model:", [], 0, 0, 1, 2) # Akan diisi nanti
-        self.ai_model_combo.currentTextChanged.connect(self.on_ai_model_changed)
-
-        styles = [
-            "Santai (Default)", "Formal (Ke Atasan)", "Akrab (Ke Teman/Pacar)",
-            "Vulgar/Dewasa (Adegan Seks)", "Sesuai Konteks Manga"
-        ]
-        self.style_combo = self._create_combo_box(ai_layout, "Translation Style:", styles, 1, 0, 1, 2)
-
-        checkbox_layout = QVBoxLayout(); checkbox_layout.setSpacing(10)
-        self.enhanced_pipeline_checkbox = QCheckBox("Enhanced Pipeline (JP Only, More API)"); checkbox_layout.addWidget(self.enhanced_pipeline_checkbox)
-        
-        # [DIUBAH] Checkbox untuk mode terjemahan
-        self.ai_only_translate_checkbox = QCheckBox("AI-Only Translate"); checkbox_layout.addWidget(self.ai_only_translate_checkbox)
-        self.deepl_only_checkbox = QCheckBox("DeepL-Only Translate"); checkbox_layout.addWidget(self.deepl_only_checkbox)
-
-        self.batch_mode_checkbox = QCheckBox("Enable Batch Processing"); checkbox_layout.addWidget(self.batch_mode_checkbox)
-        self.safe_mode_checkbox = QCheckBox("Enable Safe Mode (Filter Konten Dewasa)"); checkbox_layout.addWidget(self.safe_mode_checkbox)
-        
-        # [BARU] Checkbox untuk GPU
-        self.use_gpu_checkbox = QCheckBox("Gunakan GPU (jika tersedia)")
-        self.use_gpu_checkbox.setChecked(self.is_gpu_available)
-        self.use_gpu_checkbox.setEnabled(self.is_gpu_available)
-        if not self.is_gpu_available:
-            self.use_gpu_checkbox.setToolTip("Tidak ada GPU NVIDIA yang terdeteksi atau PyTorch tidak terinstal.")
-        checkbox_layout.addWidget(self.use_gpu_checkbox)
-
-        self.ai_only_translate_checkbox.stateChanged.connect(self.on_translation_mode_changed)
-        self.deepl_only_checkbox.stateChanged.connect(self.on_translation_mode_changed)
-        self.batch_mode_checkbox.stateChanged.connect(self.on_batch_mode_changed)
-        ai_layout.addLayout(checkbox_layout, 2, 0, 1, 2)
-        layout.addWidget(ai_group)
-
-        # Worker Settings Group
-        worker_group = QGroupBox("Worker Settings")
-        worker_layout = QGridLayout(worker_group)
-        self.max_workers_spinbox = self._create_spin_box(worker_layout, "Max Workers:", 1, 50, self.MAX_WORKERS, 0, 0)
-        self.spawn_threshold_spinbox = self._create_spin_box(worker_layout, "Spawn Threshold:", 1, 10, self.WORKER_SPAWN_THRESHOLD, 1, 0)
-        self.max_workers_spinbox.valueChanged.connect(self.on_max_workers_changed)
-        self.spawn_threshold_spinbox.valueChanged.connect(self.on_spawn_threshold_changed)
-        layout.addWidget(worker_group)
-
         layout.addStretch()
         return tab
 
@@ -1576,6 +1707,89 @@ class MangaOCRApp(QMainWindow):
         font_style_layout.addWidget(self.vertical_typeset_checkbox)
         layout.addWidget(font_style_group)
 
+        layout.addStretch()
+        return tab
+
+    def _create_ai_hardware_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 15, 10, 10)
+        layout.setSpacing(15)
+
+        # AI Model Configuration
+        ai_group = QGroupBox("AI Models & Translation")
+        ai_layout = QGridLayout(ai_group)
+        ai_layout.setHorizontalSpacing(12)
+        ai_layout.setVerticalSpacing(10)
+
+        self.ai_model_combo = self._create_combo_box(ai_layout, "AI Model:", [], 0, 0, 1, 2)
+        self.ai_model_combo.currentTextChanged.connect(self.on_ai_model_changed)
+
+        styles = [
+            "Santai (Default)", "Formal (Ke Atasan)", "Akrab (Ke Teman/Pacar)",
+            "Vulgar/Dewasa (Adegan Seks)", "Sesuai Konteks Manga"
+        ]
+        self.style_combo = self._create_combo_box(ai_layout, "Translation Style:", styles, 1, 0, 1, 2)
+        layout.addWidget(ai_group)
+
+        # Processing & Safety Modes
+        mode_group = QGroupBox("Processing Modes")
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(8)
+        self.enhanced_pipeline_checkbox = QCheckBox("Enhanced Pipeline (JP Only, More API)")
+        self.enhanced_pipeline_checkbox.stateChanged.connect(self.on_pipeline_mode_changed)
+        mode_layout.addWidget(self.enhanced_pipeline_checkbox)
+
+        self.ai_only_translate_checkbox = QCheckBox("AI-Only Translate")
+        self.deepl_only_checkbox = QCheckBox("DeepL-Only Translate")
+        self.ai_only_translate_checkbox.stateChanged.connect(self.on_translation_mode_changed)
+        self.deepl_only_checkbox.stateChanged.connect(self.on_translation_mode_changed)
+        mode_layout.addWidget(self.ai_only_translate_checkbox)
+        mode_layout.addWidget(self.deepl_only_checkbox)
+
+        self.safe_mode_checkbox = QCheckBox("Enable Safe Mode (Filter Konten Dewasa)")
+        mode_layout.addWidget(self.safe_mode_checkbox)
+
+        self.batch_mode_checkbox = QCheckBox("Enable Batch Processing")
+        self.batch_mode_checkbox.stateChanged.connect(self.on_batch_mode_changed)
+        mode_layout.addWidget(self.batch_mode_checkbox)
+        layout.addWidget(mode_group)
+
+        # Hardware Controls
+        hardware_group = QGroupBox("Hardware & Performance")
+        hardware_layout = QGridLayout(hardware_group)
+        hardware_layout.setHorizontalSpacing(12)
+        hardware_layout.setVerticalSpacing(10)
+
+        self.use_gpu_checkbox = QCheckBox("Enable GPU Acceleration")
+        self.use_gpu_checkbox.setChecked(self.is_gpu_available)
+        self.use_gpu_checkbox.setEnabled(self.is_gpu_available)
+        if not self.is_gpu_available:
+            self.use_gpu_checkbox.setToolTip("Tidak ada GPU NVIDIA yang terdeteksi atau PyTorch tidak terinstal.")
+        self.use_gpu_checkbox.stateChanged.connect(self.update_gpu_status_label)
+        hardware_layout.addWidget(self.use_gpu_checkbox, 0, 0, 1, 2)
+
+        self.gpu_status_label = QLabel("GPU Detected" if self.is_gpu_available else "GPU Not Detected")
+        self.gpu_status_label.setObjectName("gpu-status")
+        hardware_layout.addWidget(self.gpu_status_label, 0, 2, 1, 1, alignment=Qt.AlignRight)
+
+        hardware_layout.addWidget(QLabel("Max Workers:"), 1, 0)
+        self.max_workers_spinbox = QSpinBox()
+        self.max_workers_spinbox.setRange(1, 50)
+        self.max_workers_spinbox.setValue(self.MAX_WORKERS)
+        self.max_workers_spinbox.valueChanged.connect(self.on_max_workers_changed)
+        hardware_layout.addWidget(self.max_workers_spinbox, 1, 1)
+
+        hardware_layout.addWidget(QLabel("Spawn Threshold:"), 2, 0)
+        self.spawn_threshold_spinbox = QSpinBox()
+        self.spawn_threshold_spinbox.setRange(1, 10)
+        self.spawn_threshold_spinbox.setValue(self.WORKER_SPAWN_THRESHOLD)
+        self.spawn_threshold_spinbox.valueChanged.connect(self.on_spawn_threshold_changed)
+        hardware_layout.addWidget(self.spawn_threshold_spinbox, 2, 1)
+
+        layout.addWidget(hardware_group)
+
+        self.update_gpu_status_label()
         layout.addStretch()
         return tab
 
@@ -2020,12 +2234,37 @@ class MangaOCRApp(QMainWindow):
         enhancements = ""
 
         style_map = {
-            "Santai (Default)": "Your tone MUST be casual and colloquial, like everyday conversation.",
-            "Formal (Ke Atasan)": "Your tone MUST be formal and respectful, suitable for addressing a superior or elder.",
-            "Akrab (Ke Teman/Pacar)": "Your tone MUST be intimate and very casual, suitable for talking to a close friend or romantic partner.",
-            "Vulgar/Dewasa (Adegan Seks)": "Your tone MUST be vulgar and explicit, suitable for an adult/sexual scene. Use direct language but still adhere to censorship rules.",
-            "Sesuai Konteks Manga": "Analyze the text and provide a translation that best fits the likely context of a manga scene (e.g., action, comedy, drama)."
+            "Santai (Default)": (
+                "Your tone MUST be casual, relaxed, and colloquial, like everyday conversation between normal people. "
+                "Use natural phrasing, contractions, and avoid stiff or textbook-like wording. "
+                "Keep it light and friendly, suitable for general manga dialogue."
+            ),
+            "Formal (Ke Atasan)": (
+                "Your tone MUST be formal, polite, and respectful, as if addressing a superior, elder, or teacher. "
+                "Avoid slang or overly casual phrasing. "
+                "Honorifics, polite endings, and respectful language should be preserved where appropriate."
+            ),
+            "Akrab (Ke Teman/Pacar)": (
+                "Your tone MUST be intimate, playful, and very casual, suitable for close friends or romantic partners. "
+                "Use warm, affectionate, or teasing expressions where natural. "
+                "Convey emotional closeness, and allow a bit of informality, slang, or cuteness if it fits the context."
+            ),
+            "Vulgar/Dewasa (Adegan Seks)": (
+                "Your tone MUST be explicit, vulgar, and direct, suitable for an adult or sexual scene. "
+                "Do not soften or censor unless absolutely required by the target language. "
+                "Use raw, straightforward words for sexual acts or body parts, while keeping the flow natural. "
+                "The style should feel raw and intense, not clinical or overly polite."
+            ),
+            "Sesuai Konteks Manga": (
+                "Analyze the text carefully and adjust your tone to best match the likely context of the manga scene. "
+                "- For comedy: be witty, light, and playful. "
+                "- For drama: be serious, emotional, and impactful. "
+                "- For action: be sharp, concise, and energetic. "
+                "- For horror: be tense, eerie, and unsettling. "
+                "Always aim for immersion: the translation should feel like it belongs naturally in the scene."
+            )
         }
+
         style = settings.get('translation_style', 'Santai (Default)')
         style_instruction = style_map.get(style, style_map["Santai (Default)"])
         enhancements += f"\n- Translation Style: {style_instruction}"
@@ -2041,31 +2280,66 @@ class MangaOCRApp(QMainWindow):
         return f"[ERROR: Unknown AI provider '{provider}']"
     
     # [DIUBAH] Fungsi terjemahan Gemini yang dimodifikasi
-    def translate_with_gemini(self, text_to_translate, target_lang, model_name, settings, is_enhanced=False, ocr_results=None):
-        if not text_to_translate.strip(): return ""
-        if not GEMINI_API_KEY or "your_gemini_key_here" in GEMINI_API_KEY: return "[GEMINI API KEY NOT CONFIGURED]"
+    def translate_with_gemini(
+        self,
+        text_to_translate,
+        target_lang,
+        model_name,
+        settings,
+        is_enhanced=False,
+        ocr_results=None,
+        selected_style="Santai (Default)"
+    ):
+        if not text_to_translate.strip():
+            return ""
+        if not GEMINI_API_KEY or "your_gemini_key_here" in GEMINI_API_KEY:
+            return "[GEMINI API KEY NOT CONFIGURED]"
         try:
             model = genai.GenerativeModel(model_name)
             prompt_enhancements = self._build_prompt_enhancements(settings)
 
+            base_rule = (
+                f"Your response must ONLY contain the final translation in {target_lang}, as RAW plain text.\n"
+                f"- Do NOT wrap output in quotes, brackets, parentheses, or code fences.\n"
+                f"- Do NOT include explanations, notes, the original text, markdown, or labels.\n"
+                f"- Preserve line breaks if the input has multiple lines.\n"
+            )
+
             if is_enhanced and ocr_results:
                 prompt = f"""
-You are an expert manga translator. Your task is to accurately translate a text bubble from a Japanese manga into natural, colloquial {target_lang}.
-Analyze and merge the following two OCR results to deduce the most accurate original text, then provide the translation.
-1. Manga-OCR Result: "{ocr_results.get('manga_ocr', '')}"
-2. Tesseract OCR Result: "{ocr_results.get('tesseract', '')}"
-{prompt_enhancements}
-Your final output must ONLY be the translated {target_lang} text. No explanations, no markdown.
-"""
+    You are an expert manga translator.
+
+    1. Automatically detect the language of the OCR text.
+    2. If the text is Japanese:
+    - Merge the following two OCR results into the most accurate Japanese text.
+    - Silently correct any OCR mistakes.
+    - Translate into natural, colloquial {target_lang}.
+    3. If the text is already {target_lang}, return it exactly as-is.
+    4. If the text is another language (not Japanese and not {target_lang}), translate it into {target_lang}.
+    {prompt_enhancements}
+    {base_rule}
+
+    OCR Results:
+    - Manga-OCR: {ocr_results.get('manga_ocr', '')}
+    - Tesseract: {ocr_results.get('tesseract', '')}
+    """
             else:
-                prompt = f"""As an expert manga translator, your task is to process a raw OCR text from a Japanese manga.
-1.  **Correct** any OCR errors in the original Japanese text.
-2.  **Translate** the corrected text into natural, colloquial {target_lang}.
-3.  **Ensure** the final translation sounds authentic and fits a casual manga context.
-{prompt_enhancements}
-**Raw OCR Text:** "{text_to_translate}"
-**Your final output must ONLY be the translated {target_lang} text. Do not include explanations, the original text, or any markdown formatting.**
-"""
+                prompt = f"""
+    You are an expert manga translator.
+
+    1. Automatically detect the language of the input text.
+    2. If the text is Japanese:
+    - Silently correct OCR mistakes.
+    - Translate into natural, colloquial {target_lang}.
+    3. If the text is already {target_lang}, return it exactly as-is.
+    4. If the text is another language (not Japanese and not {target_lang}), translate it into {target_lang}.
+    {prompt_enhancements}
+    {base_rule}
+
+    Raw OCR Text:
+    {text_to_translate}
+    """
+
             response = model.generate_content(prompt)
             if response.parts:
                 self.add_api_cost(len(prompt), len(response.text), 'Gemini', model_name)
@@ -2074,7 +2348,8 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
         except Exception as e:
             print(f"Error calling Gemini API for full translation: {e}")
             return "[GEMINI ERROR]"
-            
+
+
     # [BARU] Fungsi terjemahan OpenAI
     def translate_with_openai(
         self,
@@ -2170,30 +2445,51 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             target_lang = (target_lang or "Indonesian").strip()
 
             base_rule = (
-                f"Return ONLY the final translation in {target_lang}, as RAW plain text. "
-                f"Do NOT wrap the entire output in quotes (\", ', “ ”, ‘ ’, 「 」, 『 』, « »), "
-                f"parentheses, brackets, or code fences. No explanations, no original text, no markdown, "
-                f"no labels, no prefixes/suffixes."
+                f"Output ONLY the final translation in {target_lang}, as RAW plain text. "
+                f"No quotes, no code fences, no markdown, no labels, no explanations, "
+                f"no original text, no notes, no extra commentary. "
+                f"Preserve line breaks if the OCR text is multi-line dialogue."
+            )
+
+            style_rules = (
+                "Translation style rules:\n"
+                "- Dialogue should sound natural and colloquial, like authentic manga speech.\n"
+                "- Adapt tone: casual for friends, polite for formal situations, exaggerated for comedic or dramatic scenes.\n"
+                "- Keep character-specific quirks (stuttering, slang, verbal tics) if detectable.\n"
+                "- Keep consistency of names, nicknames, and terms across translations.\n"
+                "- If OCR contains sound effects (e.g., 'ドキドキ', 'ガーン'), translate to natural equivalents or expressive onomatopoeia in target_lang.\n"
+                "- Do NOT add translator notes.\n"
             )
 
             if is_enhanced and ocr_results:
                 system_prompt = (
-                    f"You are an expert manga translator. Merge two OCR outputs to reconstruct the most accurate original "
-                    f"Japanese text, then translate it into natural, colloquial {target_lang}. {prompt_enhancements}. "
-                    f"{base_rule}"
+                    f"You are an expert manga translator.\n"
+                    f"1. Automatically detect the language of the text.\n"
+                    f"2. If Japanese → merge and correct the following OCR outputs, then translate into natural {target_lang}.\n"
+                    f"3. If already in {target_lang} → return as-is with no changes.\n"
+                    f"4. If in another language → translate into {target_lang}.\n"
+                    f"{style_rules} {prompt_enhancements} {base_rule}"
                 )
                 user_prompt = (
-                    "Analyze and merge the following two OCR results, then translate the deduced text:\n"
-                    f"1. Manga-OCR: \"{ocr_results.get('manga_ocr', '')}\"\n"
-                    f"2. Tesseract: \"{ocr_results.get('tesseract', '')}\"\n"
+                    "OCR Results:\n"
+                    f"1. Manga-OCR: {ocr_results.get('manga_ocr', '')}\n"
+                    f"2. Tesseract: {ocr_results.get('tesseract', '')}"
                 )
             else:
                 system_prompt = (
-                    f"You are an expert manga translator. Given raw OCR text from a Japanese manga, first silently correct any "
-                    f"OCR errors in the Japanese text, then translate the corrected text into natural, colloquial {target_lang}. "
-                    f"{prompt_enhancements}. {base_rule}"
+                    f"You are an expert manga translator.\n"
+                    f"1. Automatically detect the language of the input text.\n"
+                    f"2. If Japanese → silently correct OCR mistakes, then translate into natural {target_lang}.\n"
+                    f"3. If already in {target_lang} → return as-is with no changes.\n"
+                    f"4. If in another language → translate into {target_lang}.\n"
+                    f"{style_rules} {prompt_enhancements} {base_rule}"
                 )
-                user_prompt = f"Raw OCR Text:\n\"{text_to_translate}\""
+                user_prompt = f"Raw OCR Text:\n{text_to_translate}"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ]
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -2493,6 +2789,22 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             'enable_mkldnn': True,  # Optimasi untuk CPU Intel
         }
 
+    def update_gpu_status_label(self):
+        if not hasattr(self, 'gpu_status_label') or not self.gpu_status_label:
+            return
+
+        if not self.is_gpu_available:
+            self.gpu_status_label.setText("GPU Not Detected")
+            self.gpu_status_label.setStyleSheet("color: #ff7b72;")
+            return
+
+        if self.use_gpu_checkbox.isChecked():
+            self.gpu_status_label.setText("GPU Acceleration Active")
+            self.gpu_status_label.setStyleSheet("color: #5de6c1;")
+        else:
+            self.gpu_status_label.setText("GPU Detected (Disabled)")
+            self.gpu_status_label.setStyleSheet("color: #ffc857;")
+
     def translate_text(self, text, target_lang):
         # Fallback to DeepL if Gemini-only is not used
         if not text.strip(): return ""
@@ -2704,9 +3016,6 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             self.file_list_widget.setCurrentRow(0)
 
     def on_file_selected(self, current_item, previous_item):
-        if self.is_in_confirmation_mode:
-            self.cancel_interactive_batch()
-
         if not current_item:
             self.clear_view()
             return
@@ -2763,6 +3072,7 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
 
             self.redraw_all_typeset_areas()
             self.update_undo_redo_buttons_state()
+            self._refresh_detection_overlay()
         except Exception as e:
             QMessageBox.critical(self, "Error Loading Image", f"Could not load image: {file_path}\nError: {e}")
             self.clear_view()
@@ -2801,6 +3111,7 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
 
         self.redraw_all_typeset_areas()
         self.update_undo_redo_buttons_state()
+        self._refresh_detection_overlay()
         self.update_nav_buttons()
 
     def get_current_data_key(self, path=None, page=-1):
@@ -2909,12 +3220,14 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             unzoomed_rect = self.unzoom_coords(selection_rect)
             if not unzoomed_rect: return
             poly = QPolygon(unzoomed_rect)
-            current_key = self.get_current_data_key()
-            if current_key in self.detected_items_map:
+            resolved_key = self._resolve_detection_key(self.get_current_data_key()) or self.get_current_data_key()
+            if resolved_key:
+                if resolved_key not in self.detected_items_map:
+                    self.detected_items_map[resolved_key] = []
                 # Menambahkan sebagai item baru yang terdeteksi secara manual
                 new_item = {'polygon': poly, 'text': None} # Teks akan di-OCR nanti
-                self.detected_items_map[current_key].append(new_item)
-                self.image_label.set_detected_items(self.detected_items_map[current_key])
+                self.detected_items_map[resolved_key].append(new_item)
+                self.image_label.set_detected_items(self.detected_items_map[resolved_key])
                 self.update_confirmation_button_text()
             self.image_label.clear_selection()
             return
@@ -2951,11 +3264,13 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             result = self.unzoom_coords(scaled_points)
             if not result: return
             unzoomed_polygon, _ = result
-            current_key = self.get_current_data_key()
-            if current_key in self.detected_items_map:
+            resolved_key = self._resolve_detection_key(self.get_current_data_key()) or self.get_current_data_key()
+            if resolved_key:
+                if resolved_key not in self.detected_items_map:
+                    self.detected_items_map[resolved_key] = []
                 new_item = {'polygon': unzoomed_polygon, 'text': None}
-                self.detected_items_map[current_key].append(new_item)
-                self.image_label.set_detected_items(self.detected_items_map[current_key])
+                self.detected_items_map[resolved_key].append(new_item)
+                self.image_label.set_detected_items(self.detected_items_map[resolved_key])
                 self.update_confirmation_button_text()
             self.image_label.clear_selection()
             return
@@ -3463,18 +3778,18 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             QMessageBox.critical(self, "Error", f"Failed to load project: {e}")
 
     def start_inline_edit(self, area):
-        if self.inline_editor: self.finish_inline_edit()
-        self.editing_area = area; self.inline_editor = QLineEdit(self.image_label)
-        zoomed_rect = self.zoom_coords(area.rect); self.inline_editor.setGeometry(zoomed_rect); self.inline_editor.setText(area.text); self.inline_editor.setFont(area.get_font())
-        if self.current_theme == 'dark': self.inline_editor.setStyleSheet("background-color: rgba(255, 255, 255, 0.9); color: black; border: 2px solid #007acc;")
-        else: self.inline_editor.setStyleSheet("background-color: rgba(50, 50, 50, 0.9); color: white; border: 2px solid #0078d7;")
-        self.inline_editor.editingFinished.connect(self.finish_inline_edit); self.inline_editor.show(); self.inline_editor.setFocus()
+        if not area:
+            return
 
-    def finish_inline_edit(self):
-        if not self.inline_editor: return
-        self.editing_area.text = self.inline_editor.text(); self.redo_stack.clear()
-        self.redraw_all_typeset_areas(); self.update_undo_redo_buttons_state()
-        self.inline_editor.deleteLater(); self.inline_editor = None; self.editing_area = None
+        dialog = TextEditDialog(area, parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            new_text = dialog.get_text()
+            if new_text != area.text:
+                area.text = new_text
+                self.redo_stack.clear()
+                self.redraw_all_typeset_areas()
+                self.update_undo_redo_buttons_state()
+                self.statusBar().showMessage("Text updated", 2000)
 
     def zoom_coords(self, unzoomed_rect):
         pixmap = self.image_label.pixmap()
@@ -3712,7 +4027,8 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
 
     def on_detection_complete(self, image_path, detections):
         self.detected_items_map[image_path] = detections
-        if image_path == self.get_current_data_key():
+        current_key = self._resolve_detection_key(self.get_current_data_key())
+        if current_key == image_path:
             self.image_label.set_detected_items(detections)
 
     def on_detection_finished(self):
@@ -3722,10 +4038,6 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             QApplication.processEvents()
             for path, detections in self.detected_items_map.items():
                 self.detected_items_map[path] = self.split_extended_bubbles(detections)
-
-            current_key = self.get_current_data_key()
-            if current_key in self.detected_items_map:
-                self.image_label.set_detected_items(self.detected_items_map[current_key])
 
         self.statusBar().showMessage("Detection complete. Please review the highlighted areas.", 5000)
         self.set_ui_for_confirmation(True)
@@ -3814,9 +4126,13 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
 
     def remove_detected_item(self, index_to_remove):
         current_key = self.get_current_data_key()
-        if current_key in self.detected_items_map and 0 <= index_to_remove < len(self.detected_items_map[current_key]):
-            del self.detected_items_map[current_key][index_to_remove]
-            self.image_label.set_detected_items(self.detected_items_map[current_key])
+        resolved_key = self._resolve_detection_key(current_key) or current_key
+        if resolved_key in self.detected_items_map and 0 <= index_to_remove < len(self.detected_items_map[resolved_key]):
+            del self.detected_items_map[resolved_key][index_to_remove]
+            if self.detected_items_map.get(resolved_key):
+                self.image_label.set_detected_items(self.detected_items_map[resolved_key])
+            else:
+                self.image_label.clear_detected_items()
             self.update_confirmation_button_text()
 
     def set_ui_for_detection(self, is_detecting):
@@ -3833,6 +4149,30 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
         self.batch_process_button.setEnabled(not is_confirming)
         self.confirm_items_button.setVisible(is_confirming)
         if is_confirming: self.update_confirmation_button_text()
+        self._refresh_detection_overlay()
+
+    def _resolve_detection_key(self, key):
+        if not key:
+            return None
+        if key in self.detected_items_map:
+            return key
+        if "::page::" in key:
+            base_key = key.split('::page::')[0]
+            if base_key in self.detected_items_map:
+                return base_key
+        return None
+
+    def _refresh_detection_overlay(self):
+        if not self.image_label:
+            return
+        if not self.is_in_confirmation_mode:
+            self.image_label.clear_detected_items()
+            return
+        current_key = self._resolve_detection_key(self.get_current_data_key())
+        if current_key and current_key in self.detected_items_map:
+            self.image_label.set_detected_items(self.detected_items_map[current_key])
+        else:
+            self.image_label.clear_detected_items()
 
     def update_confirmation_button_text(self):
         total_items = sum(len(items) for items in self.detected_items_map.values())
@@ -3948,8 +4288,6 @@ Your final output must ONLY be the translated {target_lang} text. No explanation
             self.batch_processor_thread.quit(); self.batch_processor_thread.wait()
         if hasattr(self, 'exchange_rate_thread') and self.exchange_rate_thread and self.exchange_rate_thread.isRunning():
             self.exchange_rate_thread.quit(); self.exchange_rate_thread.wait()
-        if hasattr(self, 'inline_editor') and self.inline_editor:
-            self.inline_editor.hide(); self.inline_editor.deleteLater(); self.inline_editor = None
         self.save_usage_data(); event.accept()
     
     # ===================================================================
