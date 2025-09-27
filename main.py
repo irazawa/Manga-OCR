@@ -1,4 +1,4 @@
-﻿# Manga OCR & Typeset Tool v16.2.0
+﻿# Manga OCR & Typeset Tool v14.1.0
 # ==============================
 # 📦 Import modul bawaan Python
 # ==============================
@@ -331,7 +331,7 @@ class QueueProcessorWorker(QObject):
                         alignment=settings.get('alignment', 'center'),
                         line_spacing=settings.get('line_spacing', 1.1),
                         char_spacing=settings.get('char_spacing', 100.0),
-                        margins=settings.get('margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
+                        margins=settings.get('margins', {'top': 0, 'right': 0, 'bottom': 0, 'left': 0})
                     )
                     self.signals.job_complete.emit(image_path, new_area, original_text, translated_text)
 
@@ -513,32 +513,26 @@ class BatchProcessorWorker(QObject):
         self.settings = settings
         self.signals = BatchProcessorSignals()
 
-    # Fungsi utama untuk memproses batch
     def run(self):
         try:
-            # Kelompokkan pekerjaan berdasarkan path gambar agar OCR dan translasi lebih efisien
             jobs_by_image = {}
             for job in self.batch_queue:
                 jobs_by_image.setdefault(job['image_path'], []).append(job)
 
-            # Proses setiap batch per gambar
             for image_path, jobs in jobs_by_image.items():
                 self.process_image_batch(image_path, jobs)
         except Exception as e:
             self.signals.error.emit(f"Error in batch processor: {e}")
         finally:
-            # Emit sinyal selesai agar UI bisa update status
             self.signals.batch_finished.emit()
 
-    # Fungsi untuk memproses semua job dari satu gambar
     def process_image_batch(self, image_path, jobs):
         provider, model_name = self.settings['ai_model']
 
-        # 1. Lakukan OCR untuk semua pekerjaan
+        # 1. OCR per job
         ocr_texts = []
         for job in jobs:
             try:
-                # Jika teks sudah ada dari fase deteksi, gunakan itu
                 if job.get('text'):
                     cleaned_text = self.main_app.clean_and_join_text(job['text'])
                 else:
@@ -547,22 +541,61 @@ class BatchProcessorWorker(QObject):
                     )
                     raw_text = self.main_app.perform_ocr(preprocessed, self.settings)
                     cleaned_text = self.main_app.clean_and_join_text(raw_text)
-                
                 ocr_texts.append(cleaned_text)
             except Exception as e:
-                ocr_texts.append("")  # agar tetap sinkron dengan urutan job
+                ocr_texts.append("")
                 self.signals.error.emit(f"OCR failed on {image_path}: {e}")
 
-        # Filter teks kosong
         prompt_lines = [f"{i+1}. {text}" for i, text in enumerate(ocr_texts) if text and "[ERROR:" not in text]
         if not prompt_lines:
             return
 
-        # 2. Buat prompt batch
-        numbered_ocr_text = "\n".join(prompt_lines)
         target_lang = self.settings['target_lang']
         prompt_enhancements = self.main_app._build_prompt_enhancements(self.settings)
 
+        # 2. Kalau provider = OPENAI → gunakan endpoint batch resmi
+        if provider.lower() == "openai":
+            try:
+                client = getattr(self.main_app, "openai_client", None)
+                if client is None:
+                    client = openai_client
+
+                requests = []
+                for i, text in enumerate(ocr_texts):
+                    if not text:
+                        continue
+                    requests.append({
+                        "custom_id": f"job-{i+1}",
+                        "body": {
+                            "model": model_name,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        f"You are an expert manga translator. Translate into {target_lang}. "
+                                        f"Only return raw translation text."
+                                    )
+                                },
+                                {"role": "user", "content": text}
+                            ]
+                        }
+                    })
+
+                # Submit batch job ke OpenAI
+                batch_job = client.batches.create(
+                    input_file=requests,
+                    endpoint="/v1/chat/completions",
+                    completion_window="24h"
+                )
+                self.signals.info.emit(f"Submitted OpenAI batch {batch_job.id} for {os.path.basename(image_path)}")
+                return  # hasil batch akan di-polling async, bukan langsung
+
+            except Exception as e:
+                self.signals.error.emit(f"OpenAI batch error on {image_path}: {e}")
+                return
+
+        # 3. Kalau provider = GEMINI → tetap pakai prompt batch (dengan limit aman)
+        numbered_ocr_text = "\n".join(prompt_lines)
         prompt = f"""
 As an expert manga translator, your task is to translate a batch of numbered text snippets from a single manga page.
 1. Translate each numbered snippet into natural, colloquial {target_lang}.
@@ -577,13 +610,16 @@ Snippets to Translate:
 Your final output must ONLY be the translated {target_lang} text, with each translation on a new line and correctly numbered.
 """
 
-        # 3. Panggil API sekali untuk batch ini
         if not self.main_app.wait_for_api_slot(provider, model_name):
             return
-        
-        # [DIUBAH] Gunakan fungsi abstrak untuk memanggil API
-        response_text = self.main_app.call_ai_for_batch(prompt, provider, model_name)
-        
+
+        response_text = self.main_app.call_ai_for_batch(
+            prompt,
+            provider,
+            model_name,
+            max_output_tokens=self.settings.get("max_output_tokens", 512)  # default aman
+        )
+
         if not response_text or "[ERROR]" in response_text or "[FAILED]" in response_text:
             self.signals.error.emit(
                 f"Failed to process batch for {os.path.basename(image_path)}: API call failed."
@@ -591,7 +627,6 @@ Your final output must ONLY be the translated {target_lang} text, with each tran
             return
 
         try:
-            # 4. Parsing respons dan petakan kembali ke pekerjaan
             translated_lines = response_text.strip().splitlines()
             translation_map = {}
             for line in translated_lines:
@@ -600,16 +635,11 @@ Your final output must ONLY be the translated {target_lang} text, with each tran
                     translation_map[int(match.group(1))] = match.group(2).strip()
 
             for i, job in enumerate(jobs):
-                original_text = ocr_texts[i]
-                if not original_text:
+                if not ocr_texts[i]:
                     continue
-
                 translated_text = translation_map.get(i + 1)
-                
-                # Terapkan Safe Mode
                 if self.settings.get('safe_mode') and translated_text:
                     translated_text = self.main_app.apply_safe_mode(translated_text)
-
                 if translated_text and "[N/A]" not in translated_text:
                     new_area = TypesetArea(
                         job['rect'], translated_text,
@@ -623,7 +653,7 @@ Your final output must ONLY be the translated {target_lang} text, with each tran
                         alignment=self.settings.get('alignment', 'center'),
                         line_spacing=self.settings.get('line_spacing', 1.1),
                         char_spacing=self.settings.get('char_spacing', 100.0),
-                        margins=self.settings.get('margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
+                        margins=self.settings.get('margins', {'top': 0, 'right': 0, 'bottom': 0, 'left': 0})
                     )
                     self.signals.batch_job_complete.emit(image_path, new_area)
 
@@ -911,10 +941,10 @@ class AdvancedTextEditDialog(QDialog):
             self.cp2x_spin.setValue(bezier[1].get('x', 0.75)); self.cp2y_spin.setValue(bezier[1].get('y', 0.2))
 
         margins = self.area.get_margins()
-        self.margin_top_spin.setValue(int(margins.get('top', 12)))
-        self.margin_right_spin.setValue(int(margins.get('right', 12)))
-        self.margin_bottom_spin.setValue(int(margins.get('bottom', 12)))
-        self.margin_left_spin.setValue(int(margins.get('left', 12)))
+        self.margin_top_spin.setValue(int(margins.get('top', 0)))
+        self.margin_right_spin.setValue(int(margins.get('right', 0)))
+        self.margin_bottom_spin.setValue(int(margins.get('bottom', 0)))
+        self.margin_left_spin.setValue(int(margins.get('left', 0)))
 
         align_value = self.area.get_alignment()
         align_idx = next((i for i, (label, _) in enumerate(self.ALIGN_OPTIONS) if label.lower().startswith(align_value)), 0)
@@ -1136,7 +1166,7 @@ class TypesetArea:
         self.alignment = alignment
         self.line_spacing = line_spacing
         self.char_spacing = char_spacing
-        self.margins = margins or {'top': 12, 'right': 12, 'bottom': 12, 'left': 12}
+        self.margins = margins or {'top': 0, 'right': 0, 'bottom': 0, 'left': 0}
         self.text_segments = segments if segments is not None else self._build_segments_from_plain(self.text, font, color)
         self.ensure_defaults()
 
@@ -1156,7 +1186,7 @@ class TypesetArea:
         if 'letterSpacing' not in self.font_info:
             self.font_info['letterSpacing'] = self.char_spacing
             self.font_info['letterSpacingType'] = QFont.PercentageSpacing
-        if not getattr(self, 'margins', None): self.margins = {'top': 12, 'right': 12, 'bottom': 12, 'left': 12}
+        if not getattr(self, 'margins', None): self.margins = {'top': 0, 'right': 0, 'bottom': 0, 'left': 0}
         if not getattr(self, 'text_segments', None):
             self.text_segments = self._build_segments_from_plain(self.text, self.get_font(), self.get_color())
         if not getattr(self, 'text', None):
@@ -1259,7 +1289,7 @@ class TypesetArea:
             return 100.0
 
     def get_margins(self):
-        margins = getattr(self, 'margins', {'top': 12, 'right': 12, 'bottom': 12, 'left': 12})
+        margins = getattr(self, 'margins', {'top': 0, 'right': 0, 'bottom': 0, 'left': 0})
         for key in ('top', 'right', 'bottom', 'left'):
             if key not in margins:
                 margins[key] = 12
@@ -1810,7 +1840,7 @@ class MangaOCRApp(QMainWindow):
 
         self.current_project_path = None
         self.current_theme = 'dark'
-        self.typeset_font = QFont("Arial", 12, QFont.Bold)
+        self.typeset_font = QFont("Arial", 9, QFont.Bold)
         self.typeset_color = QColor(Qt.black)
 
         self.processing_queue = []
@@ -1867,32 +1897,57 @@ class MangaOCRApp(QMainWindow):
             'Gemini': {
                 'gemini-2.5-flash-lite': {
                     'display': 'Gemini 2.5 Flash Lite (Utama - Cepat & Murah)',
-                    'pricing': {'input': 0.0001 / 1000, 'output': 0.0002 / 1000}, 'limits': {'rpm': 4000, 'rpd': 10000000}
+                    'pricing': {
+                        'input': 0.0000001,   # USD per token
+                        'output': 0.0000002
+                    },
+                    'limits': {'rpm': 4000, 'rpd': 10000000}
                 },
                 'gemini-2.5-flash': {
                     'display': 'Gemini 2.5 Flash (Akurasi Lebih Tinggi)',
-                    'pricing': {'input': 0.000125 / 1000, 'output': 0.00025 / 1000}, 'limits': {'rpm': 1000, 'rpd': 10000}
+                    'pricing': {
+                        'input': 0.000000125,
+                        'output': 0.00000025
+                    },
+                    'limits': {'rpm': 1000, 'rpd': 10000}
                 },
                 'gemini-2.5-pro': {
                     'display': 'Gemini 2.5 Pro (Teks Rumit & Penting)',
-                    'pricing': {'input': 0.0025 / 1000, 'output': 0.0025 / 1000}, 'limits': {'rpm': 150, 'rpd': 10000}
+                    'pricing': {
+                        'input': 0.0000025,
+                        'output': 0.0000025
+                    },
+                    'limits': {'rpm': 150, 'rpd': 10000}
                 }
             },
             'OpenAI': {
                 'gpt-4o-mini': {
                     'display': 'GPT-4o Mini (Alternatif Cepat)',
-                    'pricing': {'input': (0.15 / 1000000) / 4, 'output': (0.6 / 1000000) / 4}, 'limits': {'rpm': 10000, 'rpd': 1000000}
+                    'pricing': {
+                        'input': 0.00000015,
+                        'output': 0.00000060
+                    },
+                    'limits': {'rpm': 10000, 'rpd': 1000000}
                 },
                 'gpt-5-nano': {
-                    'display': 'GPT-5 Nano (Hipotetikal)',
-                    'pricing': {'input': (0.15 / 1000000) / 4, 'output': (0.6 / 1000000) / 4}, 'limits': {'rpm': 10000, 'rpd': 1000000}
+                    'display': 'GPT-5 Nano (Super Hemat)',
+                    'pricing': {
+                        'input': 0.00000005,
+                        'output': 0.00000040
+                    },
+                    'limits': {'rpm': 10000, 'rpd': 1000000}
                 },
-                 'gpt-5-mini': {
-                    'display': 'GPT-5 Mini (Hipotetikal)',
-                    'pricing': {'input': (0.15 / 1000000) / 4, 'output': (0.6 / 1000000) / 4}, 'limits': {'rpm': 10000, 'rpd': 1000000}
+                'gpt-5-mini': {
+                    'display': 'GPT-5 Mini (Seimbang)',
+                    'pricing': {
+                        'input': 0.00000015,
+                        'output': 0.00000060
+                    },
+                    'limits': {'rpm': 10000, 'rpd': 1000000}
                 }
             }
         }
+
         
         self.OCR_LANGS = {} # Akan diisi saat inisialisasi
 
@@ -1919,6 +1974,8 @@ class MangaOCRApp(QMainWindow):
         self.detection_thread = None
         self.detection_worker = None
         self.detected_items_map = {} # path -> list of dicts
+        self.last_detection_mode = None
+        self.preview_mode_active = False
 
         self.init_ui()
         self.setup_styles()
@@ -1927,7 +1984,6 @@ class MangaOCRApp(QMainWindow):
         self.load_usage_data()
         self.check_limits_and_update_ui()
         self.fetch_exchange_rate()
-
 
     def setup_menu_bar(self):
         menu_bar = self.menuBar()
@@ -1945,6 +2001,7 @@ class MangaOCRApp(QMainWindow):
 
         view_menu = menu_bar.addMenu('&View')
         toggle_theme_action = QAction('Toggle Light/Dark Mode', self); toggle_theme_action.triggered.connect(self.toggle_theme); view_menu.addAction(toggle_theme_action)
+        settings_menu = menu_bar.addMenu('&Settings')
         help_menu = menu_bar.addMenu('&Help / Usage')
         about_action = QAction('About & API Usage', self); about_action.triggered.connect(self.show_about_dialog); help_menu.addAction(about_action)
 
@@ -2104,6 +2161,8 @@ class MangaOCRApp(QMainWindow):
         bottom_layout.addWidget(self.active_workers_label)
 
         api_status_layout1 = QGridLayout()
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
         self.rpm_label = QLabel("RPM: 0 / 0")
         self.rpd_label = QLabel("RPD: 0 / 0")
         api_status_layout1.addWidget(self.rpm_label, 0, 0); api_status_layout1.addWidget(self.rpd_label, 0, 1)
@@ -2114,6 +2173,31 @@ class MangaOCRApp(QMainWindow):
         self.cost_idr_label = QLabel("Cost (IDR): Rp 0")
         api_status_layout2.addWidget(self.cost_label, 0, 0); api_status_layout2.addWidget(self.cost_idr_label, 0, 1)
         bottom_layout.addLayout(api_status_layout2)
+
+        # 🔹 Tambahan: Provider, Model, & Token Usage
+        api_status_layout3 = QGridLayout()
+        self.provider_label = QLabel("Provider: -")
+        self.model_label = QLabel("Model: -")
+        api_status_layout3.addWidget(self.provider_label, 0, 0); api_status_layout3.addWidget(self.model_label, 0, 1)
+        bottom_layout.addLayout(api_status_layout3)
+
+        api_status_layout4 = QGridLayout()
+        self.input_tokens_label = QLabel("Input Tokens: 0")
+        self.output_tokens_label = QLabel("Output Tokens: 0")
+        api_status_layout4.addWidget(self.input_tokens_label, 0, 0); api_status_layout4.addWidget(self.output_tokens_label, 0, 1)
+        bottom_layout.addLayout(api_status_layout4)
+
+        api_status_layout5 = QGridLayout()
+        self.rate_label_input = QLabel("Rate Input: $0.0000000")
+        self.rate_label_output = QLabel("Rate Output: $0.0000000")
+        api_status_layout5.addWidget(self.rate_label_input, 0, 0); api_status_layout5.addWidget(self.rate_label_output, 0, 1)
+        bottom_layout.addLayout(api_status_layout5)
+
+        api_status_layout6 = QGridLayout()
+        self.translated_count = 0
+        self.translated_label = QLabel("Translated Snippets: 0")
+        api_status_layout6.addWidget(self.translated_label, 0, 0)
+        bottom_layout.addLayout(api_status_layout6)
 
         self.countdown_label = QLabel("Cooldown: 60s")
         self.countdown_label.setStyleSheet("color: #ffc107;"); self.countdown_label.setVisible(False)
@@ -2141,11 +2225,25 @@ class MangaOCRApp(QMainWindow):
         self.ocr_engine_info_label.setWordWrap(True)
         self.ocr_engine_info_label.setStyleSheet("font-size: 8pt; color: #aaa;")
         ocr_layout.addWidget(self.ocr_engine_info_label, 2, 0, 1, 2)
-        
+
         self.translate_combo = self._create_combo_box(ocr_layout, "Translate to:", ["Indonesian", "English"], 3, 0, 1, 2, default="Indonesian")
         self.orientation_combo = self._create_combo_box(ocr_layout, "Orientation:", ["Auto-Detect", "Horizontal", "Vertical"], 4, 0, 1, 2)
 
         layout.addWidget(ocr_group)
+
+        detection_group = QGroupBox("OCR Detection Source")
+        detection_layout = QGridLayout(detection_group)
+        self.manga_use_easy_detection_checkbox = QCheckBox("Manga-OCR: use EasyOCR regions (recognize with Manga-OCR)")
+        self.manga_use_easy_detection_checkbox.setChecked(True)
+        self.manga_use_easy_detection_checkbox.setToolTip("When enabled, EasyOCR proposes text regions and Manga-OCR performs recognition. Disable to use Manga-OCR's own lightweight detection heuristic.")
+        detection_layout.addWidget(self.manga_use_easy_detection_checkbox, 0, 0, 1, 2)
+
+        self.tesseract_use_easy_detection_checkbox = QCheckBox("Tesseract: use EasyOCR regions (recognize with Tesseract)")
+        self.tesseract_use_easy_detection_checkbox.setChecked(True)
+        self.tesseract_use_easy_detection_checkbox.setToolTip("When enabled, EasyOCR proposes text regions before Tesseract recognition. Disable to rely on Tesseract's native detection from image_to_data.")
+        detection_layout.addWidget(self.tesseract_use_easy_detection_checkbox, 1, 0, 1, 2)
+
+        layout.addWidget(detection_group)
 
         layout.addStretch()
         return tab
@@ -2679,17 +2777,50 @@ class MangaOCRApp(QMainWindow):
             print(f"Error running inpaint model: {e}")
             return None
 
-    def add_api_cost(self, input_chars, output_chars, provider, model_name):
+    def add_api_cost(self, input_tokens, output_tokens, provider, model_name):
+        """
+        Hitung biaya API berdasarkan jumlah token input/output.
+        Update juga info token real-time & akumulasi.
+        """
         model_info = self.AI_PROVIDERS.get(provider, {}).get(model_name)
-        if not model_info: return
+        if not model_info:
+            return
 
         pricing = model_info['pricing']
-        cost = (input_chars * pricing['input']) + (output_chars * pricing['output'])
+        # Hitung biaya total (USD)
+        cost = (input_tokens * pricing['input']) + (output_tokens * pricing['output'])
         self.total_cost += cost
+
+        # 🔹 Update akumulasi token
+        if not hasattr(self, "total_input_tokens"):
+            self.total_input_tokens = 0
+        if not hasattr(self, "total_output_tokens"):
+            self.total_output_tokens = 0
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+
+        # 🔹 Update status detail
+        self.provider_label.setText(f"Provider: {provider}")
+        self.model_label.setText(f"Model: {model_name}")
+        self.input_tokens_label.setText(
+            f"Input Tokens: {input_tokens:,} (Total: {self.total_input_tokens:,})"
+        )
+        self.output_tokens_label.setText(
+            f"Output Tokens: {output_tokens:,} (Total: {self.total_output_tokens:,})"
+        )
+        self.rate_label_input.setText(f"Rate Input: ${pricing['input']:.9f} / token")
+        self.rate_label_output.setText(f"Rate Output: ${pricing['output']:.9f} / token")
+
+        # Update tampilan cost
         self.update_cost_display()
+        # Simpan ke file/log
         self.save_usage_data()
 
+
     def update_cost_display(self):
+        """
+        Update tampilan biaya (USD & IDR).
+        """
         self.cost_label.setText(f"Cost (USD): ${self.total_cost:.4f}")
         cost_idr = self.total_cost * self.usd_to_idr_rate
         self.cost_idr_label.setText(f"Cost (IDR): Rp {cost_idr:,.0f}")
@@ -2872,15 +3003,34 @@ class MangaOCRApp(QMainWindow):
     {text_to_translate}
     """
 
-            response = model.generate_content(prompt)
+            # ✅ Tambah config untuk batasi output tokens + longgarkan safety_settings
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "max_output_tokens": 1024,  # batas aman
+                    "temperature": settings.get("temperature", 0.5) if isinstance(settings, dict) else 0.5
+                },
+                safety_settings=[
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                ]
+            )
+
             if response.parts:
                 self.add_api_cost(len(prompt), len(response.text), 'Gemini', model_name)
+
+                # ✅ Update counter
+                self.translated_count += 1
+                if hasattr(self, "translated_label"):
+                    self.translated_label.setText(f"Translated Snippets: {self.translated_count}")
+
                 return response.text.strip()
             return "[GEMINI FAILED]"
         except Exception as e:
             print(f"Error calling Gemini API for full translation: {e}")
             return "[GEMINI ERROR]"
-
 
     # [BARU] Fungsi terjemahan OpenAI
     def translate_with_openai(
@@ -2894,71 +3044,19 @@ class MangaOCRApp(QMainWindow):
     ):
         """
         Terjemahkan teks manga via OpenAI Chat Completions.
-        - Prompt diperketat agar output RAW tanpa tanda kutip/markdown.
-        - Auto-sanitizer menghapus pembungkus seperti "…", “…”, 「…」, 『…』, «…», serta code fence ```…```.
-        - Tidak mengirim 'temperature' untuk model yang tak mendukung (gpt-5-mini/nano).
-        - Mode 'enhanced' menggabungkan hasil OCR (manga-ocr & tesseract).
+        - Gunakan caching untuk system prompt (biar hemat).
+        - OCR text user tidak dicache karena selalu berbeda.
         """
 
         # ---------- Helper: sanitizer output ----------
         def _sanitize_output(s: str) -> str:
             if not s:
                 return s
-
             s = s.strip()
-
-            # 1) Hilangkan code fence penuh (```...```), opsional dengan bahasa
             import re
             fence_match = re.fullmatch(r"```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```", s)
             if fence_match:
                 s = fence_match.group(1).strip()
-
-            # 2) Hilangkan satu pasang pembungkus penuh jika SELURUH teks terbungkus
-            #    (konservatif: hanya kalau jumlah tanda kutipnya tepat 2, agar tidak merusak kutip internal)
-            pairs = [
-                ("\"", "\""), ("“", "”"), ("‘", "’"),
-                ("'", "'"),
-                ("「", "」"), ("『", "』"),
-                ("«", "»"),
-            ]
-
-            def _strip_pair(text, left, right):
-                if text.startswith(left) and text.endswith(right):
-                    # hitung kemunculan agar tidak mengupas jika ada kutip internal yang sama
-                    if left == right:
-                        if text.count(left) == 2:
-                            return text[len(left):-len(right)].strip()
-                    else:
-                        # untuk pasangan berbeda (mis. “ ”, 「 」), cek hanya sekali di ujung
-                        inner = text[len(left):-len(right)]
-                        # jangan kupas kalau di dalam masih ada pasangan lengkap yang sama secara seimbang
-                        return inner.strip()
-                return None
-
-            # coba kupas untuk semua pair di atas
-            for l, r in pairs:
-                # khusus pasangan berbeda, cukup jika terbungkus; tidak perlu hitung jumlah persis
-                if s.startswith(l) and s.endswith(r):
-                    inner = s[len(l):-len(r)].strip()
-                    # Pastikan inner tidak kosong setelah kupas
-                    if inner:
-                        s = inner
-                    break
-
-            # 3) Hilangkan pembungkus yang kadang muncul seperti ( … ) atau [ … ] bila jelas bungkusan penuh
-            bracket_pairs = [("(", ")"), ("[", "]"), ("（", "）")]
-            for l, r in bracket_pairs:
-                if s.startswith(l) and s.endswith(r):
-                    inner = s[len(l):-len(r)].strip()
-                    # Kupas hanya jika tidak ada baris baru dan tidak ada pasangan penutup lain di tengah
-                    if inner and ("\n" not in inner):
-                        s = inner
-                    break
-
-            # 4) Bersihkan backticks tunggal penuh
-            if s.startswith("`") and s.endswith("`") and s.count("`") == 2:
-                s = s[1:-1].strip()
-
             return s
 
         # ---------- Guard ----------
@@ -2968,11 +3066,7 @@ class MangaOCRApp(QMainWindow):
             return "[OPENAI NOT CONFIGURED]"
 
         try:
-            # --- Build prompts (lebih ketat soal output) ---
-            # Aturan utama:
-            # - Output HARUS raw text dalam {target_lang}
-            # - Jangan bungkus dengan tanda kutip, kode, atau markdown apa pun
-            # - Jangan sertakan teks asli, penjelasan, catatan, atau label
+            # --- Build prompts ---
             prompt_enhancements = self._build_prompt_enhancements(settings) if hasattr(self, "_build_prompt_enhancements") else ""
             target_lang = (target_lang or "Indonesian").strip()
 
@@ -2989,7 +3083,7 @@ class MangaOCRApp(QMainWindow):
                 "- Adapt tone: casual for friends, polite for formal situations, exaggerated for comedic or dramatic scenes.\n"
                 "- Keep character-specific quirks (stuttering, slang, verbal tics) if detectable.\n"
                 "- Keep consistency of names, nicknames, and terms across translations.\n"
-                "- If OCR contains sound effects (e.g., 'ドキドキ', 'ガーン'), translate to natural equivalents or expressive onomatopoeia in target_lang.\n"
+                "- If OCR contains sound effects (e.g., 'ドキドキ', 'ガーン'), translate to natural equivalents or expressive onomatopoeia.\n"
                 "- Do NOT add translator notes.\n"
             )
 
@@ -3018,17 +3112,7 @@ class MangaOCRApp(QMainWindow):
                 )
                 user_prompt = f"Raw OCR Text:\n{text_to_translate}"
 
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ]
-
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ]
-
-            # --- Temperature handling ---
+            # --- Build request ---
             model_lower = (model_name or "").lower()
             supports_temperature = not (
                 model_lower.startswith("gpt-5-mini") or model_lower.startswith("gpt-5-nano")
@@ -3037,7 +3121,15 @@ class MangaOCRApp(QMainWindow):
 
             req_kwargs = {
                 "model": model_name,
-                "messages": messages,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                        # 🔹 simpan system prompt di cache biar hemat
+                        "cache_control": {"type": "ephemeral"}
+                    },
+                    {"role": "user", "content": user_prompt},  # OCR text → tidak dicache
+                ],
             }
             if supports_temperature and desired_temp is not None:
                 req_kwargs["temperature"] = float(desired_temp)
@@ -3045,20 +3137,23 @@ class MangaOCRApp(QMainWindow):
             # --- Call API ---
             client = getattr(self, "openai_client", None)
             if client is None:
-                # fallback ke global jika ada
-                client = openai_client  # pastikan objek ini ada di konteksmu
+                client = openai_client
 
             response = client.chat.completions.create(**req_kwargs)
             output_text = (response.choices[0].message.content or "").strip()
-
-            # --- Sanitizer utk jaga-jaga kalau model masih membungkus output ---
             output_text = _sanitize_output(output_text)
 
-            # --- Hitung "biaya" sederhana ---
-            prompt_chars = len(system_prompt) + len(user_prompt)
-            output_chars = len(output_text)
-            if hasattr(self, "add_api_cost"):
-                self.add_api_cost(prompt_chars, output_chars, "OpenAI", model_name)
+            # --- Hitung biaya dengan token usage dari API ---
+            if hasattr(response, "usage"):
+                in_tokens = response.usage.prompt_tokens
+                out_tokens = response.usage.completion_tokens
+                if hasattr(self, "add_api_cost"):
+                    self.add_api_cost(in_tokens, out_tokens, "OpenAI", model_name)
+
+            # ✅ Update counter
+            self.translated_count += 1
+            if hasattr(self, "translated_label"):
+                self.translated_label.setText(f"Translated Snippets: {self.translated_count}")
 
             return output_text or ""
 
@@ -3072,6 +3167,7 @@ class MangaOCRApp(QMainWindow):
                 return "[OPENAI ERROR] Kena rate limit. Coba lagi beberapa saat."
             print(f"Error calling OpenAI API: {e}")
             return "[OPENAI ERROR]"
+
 
     def apply_safe_mode(self, text: str) -> str:
         """Applies the Safe Mode filter to the translated text."""
@@ -3328,6 +3424,8 @@ class MangaOCRApp(QMainWindow):
             'line_spacing': 1.1,
             'char_spacing': 100.0,
             'margins': {'top': 0, 'right': 0, 'bottom': 0, 'left': 0},
+            'manga_use_easy_detection': bool(getattr(self, 'manga_use_easy_detection_checkbox', None) and self.manga_use_easy_detection_checkbox.isChecked()),
+            'tesseract_use_easy_detection': bool(getattr(self, 'tesseract_use_easy_detection_checkbox', None) and self.tesseract_use_easy_detection_checkbox.isChecked()),
         }
 
     def update_gpu_status_label(self):
@@ -4268,20 +4366,12 @@ class MangaOCRApp(QMainWindow):
         doc.drawContents(doc_painter)
         doc_painter.end()
 
-        if orientation == 'vertical':
-            scale_w = rect.width() / image_height if image_height else 1.0
-            scale_h = rect.height() / image_width if image_width else 1.0
-        else:
-            scale_w = rect.width() / image_width if image_width else 1.0
-            scale_h = rect.height() / image_height if image_height else 1.0
-        scale = min(scale_w, scale_h)
-
         painter.translate(rect.center())
         if orientation == 'vertical':
             painter.rotate(90)
-        painter.scale(scale, scale)
         painter.translate(-image_width / 2, -image_height / 2)
         painter.drawImage(0, 0, image)
+
 
     def _flatten_segments_to_lines(self, area):
         lines = []
@@ -4837,9 +4927,12 @@ class MangaOCRApp(QMainWindow):
         if reply == QMessageBox.No: return
 
         self.detected_items_map.clear()
+        self.last_detection_mode = detection_mode
+        self.preview_mode_active = False
         self.set_ui_for_detection(True)
 
         settings = self.get_current_settings()
+        settings['batch_text_detection_enabled'] = (detection_mode == "Text")
         self.detection_thread = QThread()
         self.detection_worker = AutoDetectorWorker(self, self.image_files, settings, detection_mode)
         self.detection_worker.moveToThread(self.detection_thread)
@@ -4857,12 +4950,25 @@ class MangaOCRApp(QMainWindow):
             self.image_label.set_detected_items(detections)
 
     def on_detection_finished(self):
+        self.set_ui_for_detection(False)
         self.overall_progress_bar.setVisible(False)
         if self.get_current_settings()['auto_split_bubbles']:
             self.statusBar().showMessage("Splitting extended items...", 3000)
             QApplication.processEvents()
             for path, detections in self.detected_items_map.items():
                 self.detected_items_map[path] = self.split_extended_bubbles(detections)
+
+        if self.last_detection_mode == "Text" and self.detected_items_map:
+            self.preview_mode_active = True
+            self.cancel_detection_button.setText("Cancel Preview")
+            self.cancel_detection_button.setVisible(True)
+            self.file_list_widget.setEnabled(True)
+            self.prev_button.setEnabled(True)
+            self.next_button.setEnabled(True)
+        else:
+            self.preview_mode_active = False
+            self.cancel_detection_button.setVisible(False)
+            self.cancel_detection_button.setText("Cancel Detection")
 
         self.statusBar().showMessage("Detection complete. Please review the highlighted areas.", 5000)
         self.set_ui_for_confirmation(True)
@@ -4947,6 +5053,9 @@ class MangaOCRApp(QMainWindow):
         self.detection_thread = None; self.detection_worker = None
         self.detected_items_map.clear(); self.image_label.clear_detected_items()
         self.set_ui_for_detection(False); self.set_ui_for_confirmation(False)
+        self.preview_mode_active = False
+        self.cancel_detection_button.setText("Cancel Detection")
+        self.cancel_detection_button.setVisible(False)
         self.statusBar().showMessage("Batch detection cancelled.", 3000)
 
     def remove_detected_item(self, index_to_remove):
@@ -4964,7 +5073,9 @@ class MangaOCRApp(QMainWindow):
         self.batch_process_button.setEnabled(not is_detecting)
         self.file_list_widget.setEnabled(not is_detecting)
         self.prev_button.setEnabled(not is_detecting); self.next_button.setEnabled(not is_detecting)
-        self.cancel_detection_button.setVisible(is_detecting)
+        if is_detecting:
+            self.cancel_detection_button.setText("Cancel Detection")
+            self.cancel_detection_button.setVisible(True)
         self.overall_progress_bar.setVisible(is_detecting)
         if is_detecting: self.overall_progress_bar.setValue(0); self.statusBar().showMessage("Starting detection...")
         else: self.overall_progress_bar.setVisible(False)
@@ -5120,189 +5231,476 @@ class MangaOCRApp(QMainWindow):
     # ===================================================================
 
     def detect_text_with_ocr_engine(self, cv_image, settings):
-        """
-        [DIUBAH] Mendeteksi teks, lalu menggabungkannya menjadi blok yang koheren.
-        """
-        engine = settings['ocr_engine']
-        lang_code = settings['ocr_lang']
-        raw_results = []
+        """Detect text regions and return recognized text polygons."""
+        engine = (settings.get('ocr_engine') or 'Tesseract')
+        advanced = settings.get('batch_text_detection_enabled', False)
 
         try:
-            if engine == 'DocTR':
-                # Perbaikan implementasi DocTR
-                if not self.doctr_predictor: 
-                    return []
-                
-                # Convert BGR to RGB
-                rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-                
-                # Predict
-                result = self.doctr_predictor([rgb_image])
-                
-                # Extract text and bounding boxes
-                for page in result.pages:
-                    for block in page.blocks:
-                        for line in block.lines:
-                            line_text = ' '.join([word.value for word in line.words])
-                            
-                            # Get bounding box coordinates
-                            geometry = line.geometry
-                            x1, y1 = geometry[0][0] * cv_image.shape[1], geometry[0][1] * cv_image.shape[0]
-                            x2, y2 = geometry[1][0] * cv_image.shape[1], geometry[1][1] * cv_image.shape[0]
-                            
-                            points = [
-                                QPoint(int(x1), int(y1)),
-                                QPoint(int(x2), int(y1)),
-                                QPoint(int(x2), int(y2)),
-                                QPoint(int(x1), int(y2))
-                            ]
-                            raw_results.append((line_text, QPolygon(points)))
-                
-                return self._merge_text_boxes_to_blocks(raw_results, cv_image.shape)
-            
-            elif engine in ['RapidOCR', 'PaddleOCR', 'EasyOCR']:
-                # Engine yang mengembalikan bounding box per baris/kata
-                if engine == 'RapidOCR':
-                    if not self.rapid_ocr_reader: return []
-                    ocr_result, _ = self.rapid_ocr_reader(cv_image)
-                    if ocr_result:
-                        for box_info in ocr_result:
-                            points = [QPoint(int(p[0]), int(p[1])) for p in box_info[0]]
-                            raw_results.append((box_info[1], QPolygon(points)))
-                elif engine == 'PaddleOCR':
-                    if not self.paddle_ocr_reader: return []
-                    ocr_result = self.paddle_ocr_reader.ocr(cv_image, cls=True)
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            points = [QPoint(int(p[0]), int(p[1])) for p in line[0]]
-                            raw_results.append((line[1][0], QPolygon(points)))
-                elif engine == 'EasyOCR':
-                    if not self.easyocr_reader: return []
-                    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-                    ocr_result = self.easyocr_reader.readtext(gray, detail=1)
-                    for (bbox, text, prob) in ocr_result:
-                        points = [QPoint(int(p[0]), int(p[1])) for p in bbox]
-                        raw_results.append((text, QPolygon(points)))
-                
-                return self._merge_text_boxes_to_blocks(raw_results, cv_image.shape)
-
-            else: # Tesseract sebagai default
-                return self._detect_text_with_tesseract(cv_image, lang_code)
-
+            raw_results = self._collect_engine_detections(cv_image, settings, engine, advanced)
         except Exception as e:
             print(f"Error during text detection with {engine}: {e}")
+            raw_results = []
 
-        return []
-    
-    # [BARU] Logika penggabungan teks untuk Tesseract
-    def _detect_text_with_tesseract(self, cv_image, lang_code):
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        data = pytesseract.image_to_data(gray, lang=lang_code, config='--oem 1 --psm 3', output_type=pytesseract.Output.DICT)
-        
-        blocks = {}
-        # Kumpulkan semua kata yang valid ke dalam bloknya masing-masing
-        for i in range(len(data['text'])):
-            conf = int(data['conf'][i])
-            text = data['text'][i].strip()
-            if conf > 40 and text:
-                block_num = data['block_num'][i]
-                if block_num not in blocks:
-                    blocks[block_num] = []
-                
-                blocks[block_num].append({
-                    'text': text,
-                    'rect': QRect(data['left'][i], data['top'][i], data['width'][i], data['height'][i])
-                })
-        
-        final_results = []
-        # Gabungkan kata-kata dalam setiap blok menjadi satu kesatuan
-        for block_num, words in blocks.items():
-            if not words: continue
-            
-            full_text = ' '.join(w['text'] for w in words)
-            
-            # Buat bounding box gabungan untuk seluruh blok
-            combined_rect = QRect()
-            for w in words:
-                if combined_rect.isEmpty():
-                    combined_rect = w['rect']
-                else:
-                    combined_rect = combined_rect.united(w['rect'])
-            
-            final_results.append((full_text, QPolygon(combined_rect)))
-            
-        return final_results
-
-
-    # [BARU] Algoritma untuk menggabungkan kotak teks yang terdeteksi
-    def _merge_text_boxes_to_blocks(self, boxes, image_shape):
-        if not boxes:
+        if not raw_results:
             return []
 
-        # Konversi ke format yang lebih mudah diolah dan hitung tinggi rata-rata
-        lines = []
-        total_height = 0
-        for text, poly in boxes:
-            rect = poly.boundingRect()
-            if rect.width() > 0 and rect.height() > 0:
-                lines.append({'text': text, 'rect': rect, 'poly': poly, 'merged': False})
-                total_height += rect.height()
-        
-        if not lines: return []
-        avg_height = total_height / len(lines)
-        
-        # Urutkan berdasarkan posisi vertikal
-        lines.sort(key=lambda l: l['rect'].top())
-        
-        # Gabungkan baris-baris yang berdekatan menjadi blok
-        blocks = []
-        for i in range(len(lines)):
-            if lines[i]['merged']:
+        if advanced:
+            raw_results = self._tighten_detection_polygons(cv_image, raw_results)
+
+        filtered = self._filter_detection_noise(raw_results, cv_image.shape, advanced=advanced)
+        if not filtered:
+            return []
+
+        merged = self._merge_text_boxes_to_blocks(filtered, cv_image.shape, strict=advanced)
+        if advanced and merged:
+            merged = self._tighten_detection_polygons(cv_image, merged)
+
+        final = self._filter_detection_noise(merged, cv_image.shape, advanced=advanced)
+        return final
+
+    def _collect_engine_detections(self, cv_image, settings, engine, advanced):
+        engine = engine or 'Tesseract'
+
+        if engine == 'DocTR':
+            return self._collect_doctr_detections(cv_image, advanced=advanced)
+        if engine == 'EasyOCR':
+            return self._collect_easyocr_detections(cv_image, advanced=advanced)
+        if engine == 'PaddleOCR':
+            return self._collect_paddleocr_detections(cv_image, advanced=advanced)
+        if engine == 'RapidOCR':
+            return self._collect_rapidocr_detections(cv_image, advanced=advanced)
+        if engine == 'Manga-OCR':
+            return self._collect_manga_detections(cv_image, settings, advanced=advanced)
+        if engine == 'Tesseract':
+            if advanced:
+                return self._collect_tesseract_advanced_detections(cv_image, settings, advanced=True)
+            return self._collect_tesseract_native_detections(cv_image, settings.get('ocr_lang') or 'eng')
+        return self._collect_easyocr_detections(cv_image, advanced=advanced)
+
+    def _collect_doctr_detections(self, cv_image, advanced=False):
+        if not self.doctr_predictor:
+            return []
+
+        rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        result = self.doctr_predictor([rgb_image])
+        items = []
+        height, width = cv_image.shape[:2]
+
+        for page in result.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    line_text = ' '.join(word.value for word in line.words)
+                    geometry = line.geometry
+                    x1 = int(geometry[0][0] * width)
+                    y1 = int(geometry[0][1] * height)
+                    x2 = int(geometry[1][0] * width)
+                    y2 = int(geometry[1][1] * height)
+                    polygon = QPolygon([
+                        QPoint(x1, y1),
+                        QPoint(x2, y1),
+                        QPoint(x2, y2),
+                        QPoint(x1, y2),
+                    ])
+                    items.append((line_text, polygon))
+
+        return items
+
+    def _collect_easyocr_detections(self, cv_image, advanced=False):
+        if not self.easyocr_reader:
+            return []
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        try:
+            ocr_result = self.easyocr_reader.readtext(gray, detail=1)
+        except Exception as e:
+            print(f"EasyOCR detection error: {e}")
+            return []
+
+        items = []
+        min_prob = 0.45 if advanced else 0.30
+        for bbox, text, prob in ocr_result:
+            if advanced and prob < min_prob:
                 continue
-            
-            current_block_lines = [lines[i]]
-            lines[i]['merged'] = True
-            
-            for j in range(i + 1, len(lines)):
-                if lines[j]['merged']:
+            polygon = QPolygon([QPoint(int(p[0]), int(p[1])) for p in bbox])
+            items.append((text, polygon))
+        return items
+
+    def _collect_paddleocr_detections(self, cv_image, advanced=False):
+        if not self.paddle_ocr_reader:
+            return []
+        try:
+            ocr_result = self.paddle_ocr_reader.ocr(cv_image, cls=True)
+        except Exception as e:
+            print(f"PaddleOCR detection error: {e}")
+            return []
+
+        items = []
+        if ocr_result and ocr_result[0]:
+            for line in ocr_result[0]:
+                polygon = QPolygon([QPoint(int(p[0]), int(p[1])) for p in line[0]])
+                items.append((line[1][0], polygon))
+        return items
+
+    def _collect_rapidocr_detections(self, cv_image, advanced=False):
+        if not self.rapid_ocr_reader:
+            return []
+        try:
+            ocr_result, _ = self.rapid_ocr_reader(cv_image)
+        except Exception as e:
+            print(f"RapidOCR detection error: {e}")
+            return []
+
+        items = []
+        if ocr_result:
+            for box_info in ocr_result:
+                polygon = QPolygon([QPoint(int(p[0]), int(p[1])) for p in box_info[0]])
+                items.append((box_info[1], polygon))
+        return items
+
+    def _collect_easy_detection_regions(self, cv_image, advanced=False):
+        return self._collect_easyocr_detections(cv_image, advanced=advanced)
+
+    def _collect_morphological_regions(self, cv_image, advanced=False):
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 9)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilated = cv2.dilate(thresh, kernel, iterations=1 if not advanced else 2)
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        h, w = gray.shape[:2]
+        items = []
+        min_area = 120 if advanced else 90
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            area = cw * ch
+            if area < max(min_area, 0.00004 * w * h):
+                continue
+            if ch < 10 or cw < 10:
+                continue
+            aspect = cw / max(1, ch)
+            if advanced and (aspect > 10 or aspect < 0.12):
+                continue
+            if cw > w * 0.95 and ch > h * 0.5:
+                continue
+            polygon = QPolygon([
+                QPoint(x, y),
+                QPoint(x + cw, y),
+                QPoint(x + cw, y + ch),
+                QPoint(x, y + ch),
+            ])
+            items.append(('', polygon))
+        return items
+
+    def _collect_manga_detections(self, cv_image, settings, advanced=False):
+        if not self.manga_ocr_reader:
+            return []
+
+        use_easy = settings.get('manga_use_easy_detection', True)
+        if use_easy:
+            regions = self._collect_easy_detection_regions(cv_image, advanced=advanced)
+        else:
+            regions = self._collect_morphological_regions(cv_image, advanced=advanced)
+
+        results = []
+        for text, polygon in regions:
+            recognized = self._recognize_polygon(cv_image, polygon, 'Manga-OCR', settings)
+            results.append((recognized or text, polygon))
+        return results
+
+    def _collect_tesseract_native_detections(self, cv_image, lang_code):
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        try:
+            data = pytesseract.image_to_data(gray, lang=lang_code, config='--oem 1 --psm 3', output_type=pytesseract.Output.DICT)
+        except Exception as e:
+            print(f"Tesseract detection error: {e}")
+            return []
+
+        blocks = {}
+        for i in range(len(data['text'])):
+            text = (data['text'][i] or '').strip()
+            if not text:
+                continue
+            try:
+                conf = float(data['conf'][i])
+            except ValueError:
+                conf = 0.0
+            if conf < 45:
+                continue
+            block_key = (data.get('page_num', [0])[i], data['block_num'][i])
+            rect = QRect(data['left'][i], data['top'][i], data['width'][i], data['height'][i])
+            blocks.setdefault(block_key, {'texts': [], 'rects': []})
+            blocks[block_key]['texts'].append(text)
+            blocks[block_key]['rects'].append(rect)
+
+        results = []
+        for info in blocks.values():
+            if not info['texts']:
+                continue
+            combined_text = ' '.join(info['texts'])
+            union_rect = info['rects'][0]
+            for rect in info['rects'][1:]:
+                union_rect = union_rect.united(rect)
+            polygon = QPolygon([
+                QPoint(union_rect.left(), union_rect.top()),
+                QPoint(union_rect.right(), union_rect.top()),
+                QPoint(union_rect.right(), union_rect.bottom()),
+                QPoint(union_rect.left(), union_rect.bottom()),
+            ])
+            results.append((combined_text, polygon))
+        return results
+
+    def _collect_tesseract_advanced_detections(self, cv_image, settings, advanced=False):
+        if settings.get('tesseract_use_easy_detection', True):
+            regions = self._collect_easy_detection_regions(cv_image, advanced=advanced)
+            results = []
+            for _, polygon in regions:
+                text = self._recognize_polygon(cv_image, polygon, 'Tesseract', settings)
+                results.append((text, polygon))
+            return results
+        return self._collect_tesseract_native_detections(cv_image, settings.get('ocr_lang') or 'eng')
+
+    def _recognize_polygon(self, cv_image, polygon, engine_name, base_settings):
+        rect = polygon.boundingRect()
+        h, w = cv_image.shape[:2]
+        pad = int(max(rect.width(), rect.height()) * 0.08)
+        x1 = max(rect.x() - pad, 0)
+        y1 = max(rect.y() - pad, 0)
+        x2 = min(rect.x() + rect.width() + pad, w)
+        y2 = min(rect.y() + rect.height() + pad, h)
+        if x2 - x1 <= 1 or y2 - y1 <= 1:
+            return ''
+        crop = cv_image[y1:y2, x1:x2].copy()
+        local_settings = dict(base_settings)
+        local_settings['ocr_engine'] = engine_name
+        if engine_name == 'Manga-OCR':
+            local_settings['ocr_lang'] = 'ja'
+            local_settings['orientation'] = 'Auto-Detect'
+        elif engine_name == 'Tesseract':
+            local_settings['ocr_lang'] = base_settings.get('ocr_lang') or 'eng'
+        text = self.perform_ocr(crop, local_settings)
+        return text.strip()
+
+    def _filter_detection_noise(self, items, image_shape, advanced=False):
+        if not items:
+            return []
+        h, w = image_shape[:2]
+        min_area_ratio = 0.00004 if advanced else 0.00003
+        min_area = max(80, min_area_ratio * w * h)
+        max_area_ratio = 0.85 if advanced else 0.9
+        filtered = []
+        for text, polygon in items:
+            cleaned = self._clean_detected_text(text)
+            if not cleaned:
+                continue
+            if len(cleaned) <= 1 and not cleaned.isalnum():
+                continue
+            if re.fullmatch(r'[\W_]+', cleaned):
+                continue
+            letters = sum(ch.isalpha() for ch in cleaned)
+            digits = sum(ch.isdigit() for ch in cleaned)
+            if advanced:
+                if letters == 0 and digits == 0 and len(cleaned) <= 3:
                     continue
-                
-                # Cek jarak vertikal antara baris saat ini (i) dan baris kandidat (j)
-                last_line_rect = current_block_lines[-1]['rect']
-                candidate_rect = lines[j]['rect']
-                
-                vertical_gap = candidate_rect.top() - last_line_rect.bottom()
-                
-                # Cek overlap horizontal
-                is_horizontally_aligned = (last_line_rect.left() < candidate_rect.right() and
-                                           last_line_rect.right() > candidate_rect.left())
-                
-                # Kondisi penggabungan: jarak vertikal kecil dan ada overlap horizontal
-                if vertical_gap < (avg_height * 0.8) and is_horizontally_aligned:
-                    current_block_lines.append(lines[j])
-                    lines[j]['merged'] = True
+                if re.fullmatch(r'[!\?\-~•°☆★♪⚡💥]+', cleaned):
+                    continue
+                if re.search(r'(.)\1{2,}', cleaned) and len(cleaned) <= 5:
+                    continue
+            unique_chars = set(cleaned)
+            if len(unique_chars) == 1 and cleaned[0] in "!?~…♪★☆✨💢#@*/":
+                continue
+            punctuation = sum(1 for ch in cleaned if not ch.isalnum() and not ch.isspace())
+            if advanced and punctuation / max(1, len(cleaned)) > 0.6:
+                continue
 
-            blocks.append(current_block_lines)
+            rect = polygon.boundingRect()
+            area = rect.width() * rect.height()
+            if area < min_area:
+                continue
+            if area > w * h * max_area_ratio:
+                continue
+            if rect.width() < 6 or rect.height() < 6:
+                continue
+            aspect_ratio = rect.width() / max(1, rect.height())
+            if advanced and (aspect_ratio > 9.0 or aspect_ratio < 0.12):
+                continue
 
-        # Finalisasi blok: gabungkan teks dan poligon
-        final_results = []
-        for block_lines in blocks:
-            if not block_lines: continue
-            
-            # Urutkan baris dalam blok secara vertikal
-            block_lines.sort(key=lambda l: l['rect'].top())
-            
-            full_text = ' '.join(l['text'] for l in block_lines)
-            
-            combined_poly = QPolygon()
-            for line in block_lines:
-                combined_poly = combined_poly.united(line['poly'])
+            filtered.append((cleaned, self._clamp_polygon(polygon, w, h)))
+        return filtered
 
-            final_results.append((full_text, combined_poly))
-            
-        return final_results
+    def _clean_detected_text(self, text):
+        if not text:
+            return ''
+        cleaned = re.sub(r'\s+', ' ', text)
+        return cleaned.strip()
+
+    def _clamp_polygon(self, polygon, width, height):
+        clamped_points = []
+        for i in range(polygon.count()):
+            pt = polygon.point(i)
+            x = max(0, min(pt.x(), width - 1))
+            y = max(0, min(pt.y(), height - 1))
+            clamped_points.append(QPoint(x, y))
+        return QPolygon(clamped_points)
 
 
+    """Helper methods for advanced OCR detection pipeline"""
+    def _merge_text_boxes_to_blocks(self, boxes, image_shape, strict=False):
+        """Group nearby text boxes into cohesive reading blocks."""
+        if not boxes:
+            return []
+        h, w = image_shape[:2]
+        diag = math.hypot(w, h)
+        max_gap = diag * (0.018 if strict else 0.04)
+        sorted_boxes = [item for item in boxes if item and item[1] is not None]
+        sorted_boxes.sort(key=lambda item: item[1].boundingRect().top())
+
+        clusters = []
+        for text, polygon in sorted_boxes:
+            rect = self._clamp_rect(polygon.boundingRect(), w, h)
+            merged = False
+            for cluster in clusters:
+                if self._rects_should_merge(rect, cluster['rect'], strict, max_gap):
+                    cluster['rect'] = cluster['rect'].united(rect)
+                    cluster['polygons'].append(polygon)
+                    cluster['texts'].append(text)
+                    merged = True
+                    break
+            if not merged:
+                clusters.append({'rect': rect, 'polygons': [polygon], 'texts': [text]})
+
+        merged_results = []
+        for cluster in clusters:
+            combined_text = self._combine_texts(cluster['texts'])
+            polygon = self._polygon_from_rect(cluster['rect'])
+            merged_results.append((combined_text, polygon))
+        return merged_results
+
+    def _rects_should_merge(self, rect_a, rect_b, strict, max_gap):
+        if rect_a.intersects(rect_b):
+            return True
+        distance = self._rect_distance(rect_a, rect_b)
+        if distance > max_gap:
+            return False
+        vertical_overlap = self._axis_overlap_ratio(
+            rect_a.top(), rect_a.top() + rect_a.height(),
+            rect_b.top(), rect_b.top() + rect_b.height()
+        )
+        horizontal_overlap = self._axis_overlap_ratio(
+            rect_a.left(), rect_a.left() + rect_a.width(),
+            rect_b.left(), rect_b.left() + rect_b.width()
+        )
+        if strict:
+            if vertical_overlap >= 0.35 and distance <= max_gap * 0.75:
+                return True
+            if horizontal_overlap >= 0.55 and distance <= max_gap * 0.75:
+                return True
+            return False
+        if vertical_overlap >= 0.2 or horizontal_overlap >= 0.65:
+            return True
+        return distance <= max_gap * 0.6
+
+    def _rect_distance(self, rect_a, rect_b):
+        ax1 = rect_a.left()
+        ax2 = rect_a.right()
+        ay1 = rect_a.top()
+        ay2 = rect_a.bottom()
+        bx1 = rect_b.left()
+        bx2 = rect_b.right()
+        by1 = rect_b.top()
+        by2 = rect_b.bottom()
+        dx = max(0, max(bx1 - ax2, ax1 - bx2))
+        dy = max(0, max(by1 - ay2, ay1 - by2))
+        return math.hypot(dx, dy)
+
+    def _axis_overlap_ratio(self, a_start, a_end, b_start, b_end):
+        overlap = max(0.0, min(a_end, b_end) - max(a_start, b_start))
+        if overlap <= 0:
+            return 0.0
+        min_size = max(1.0, min(a_end - a_start, b_end - b_start))
+        return overlap / min_size
+
+    def _polygon_from_rect(self, rect):
+        x1 = rect.left()
+        y1 = rect.top()
+        x2 = rect.right()
+        y2 = rect.bottom()
+        return QPolygon([
+            QPoint(x1, y1),
+            QPoint(x2, y1),
+            QPoint(x2, y2),
+            QPoint(x1, y2),
+        ])
+
+    def _clamp_rect(self, rect, width, height):
+        x = max(0, rect.left())
+        y = max(0, rect.top())
+        right = min(rect.right(), width - 1)
+        bottom = min(rect.bottom(), height - 1)
+        if right < x:
+            right = x
+        if bottom < y:
+            bottom = y
+        return QRect(x, y, (right - x) + 1, (bottom - y) + 1)
+
+    def _tighten_detection_polygons(self, cv_image, items):
+        if not items:
+            return []
+        h, w = cv_image.shape[:2]
+        refined = []
+        for text, polygon in items:
+            refined_polygon = self._refine_polygon_with_image(cv_image, polygon)
+            refined.append((text, self._clamp_polygon(refined_polygon, w, h)))
+        return refined
+
+    def _refine_polygon_with_image(self, cv_image, polygon):
+        rect = polygon.boundingRect()
+        h, w = cv_image.shape[:2]
+        rect = self._clamp_rect(rect, w, h)
+        if rect.width() <= 2 or rect.height() <= 2:
+            return self._polygon_from_rect(rect)
+
+        x, y, width, height = rect.left(), rect.top(), rect.width(), rect.height()
+        crop = cv_image[y:y + height, x:x + width]
+        if crop.size == 0:
+            return self._polygon_from_rect(rect)
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        _, thresh_inv = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        candidates = [thresh_inv, thresh]
+
+        best_rect = None
+        best_area = None
+        for mask in candidates:
+            coords = cv2.findNonZero(mask)
+            if coords is None:
+                continue
+            bx, by, bw, bh = cv2.boundingRect(coords)
+            area = bw * bh
+            if best_rect is None or area < best_area:
+                best_rect = (bx, by, bw, bh)
+                best_area = area
+
+        if best_rect is None:
+            return self._polygon_from_rect(rect)
+
+        bx, by, bw, bh = best_rect
+        pad = max(1, int(min(bw, bh) * 0.05))
+        bx = max(0, bx - pad)
+        by = max(0, by - pad)
+        bw = min(width - bx, bw + pad * 2)
+        bh = min(height - by, bh + pad * 2)
+
+        refined_rect = QRect(x + bx, y + by, max(1, bw), max(1, bh))
+        refined_rect = self._clamp_rect(refined_rect, w, h)
+        return self._polygon_from_rect(refined_rect)
+
+    def _combine_texts(self, texts):
+        parts = [t.strip() for t in texts if t and t.strip()]
+        return ' '.join(parts)
+    
     def perform_ocr(self, image_to_process, settings: dict) -> str:
         """
         [DIUBAH] Menjalankan OCR pada gambar yang diberikan berdasarkan pengaturan.
@@ -5418,28 +5816,42 @@ class BatchSaveDialog(QDialog):
             btn.clicked.connect(lambda _, n=num: self.select_next_unsaved(n))
             selection_layout.addWidget(btn, 0, i)
 
-        select_all_btn = QPushButton("Select All Unsaved"); select_all_btn.clicked.connect(self.select_all_unsaved); selection_layout.addWidget(select_all_btn, 1, 0, 1, 2)
-        deselect_all_btn = QPushButton("Deselect All"); deselect_all_btn.clicked.connect(self.deselect_all); selection_layout.addWidget(deselect_all_btn, 1, 2, 1, 3)
+        select_all_btn = QPushButton("Select All Unsaved")
+        select_all_btn.clicked.connect(self.select_all_unsaved)
+        selection_layout.addWidget(select_all_btn, 1, 0, 1, 2)
+
+        deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.clicked.connect(self.deselect_all)
+        selection_layout.addWidget(deselect_all_btn, 1, 2, 1, 3)
         layout.addLayout(selection_layout)
 
-        self.list_widget = QListWidget(); self.populate_list(); layout.addWidget(self.list_widget)
+        self.list_widget = QListWidget()
+        self.populate_list()
+        layout.addWidget(self.list_widget)
 
         button_layout = QHBoxLayout()
-        self.save_button = QPushButton("Save Selected"); self.save_button.clicked.connect(self.accept)
-        self.cancel_button = QPushButton("Cancel"); self.cancel_button.clicked.connect(self.reject)
-        button_layout.addStretch(); button_layout.addWidget(self.cancel_button); button_layout.addWidget(self.save_button)
+        self.save_button = QPushButton("Save Selected")
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.save_button)
         layout.addLayout(button_layout)
 
     def populate_list(self):
         self.list_widget.clear()
         for file_path in self.all_files:
-            if "_typeset" in file_path.lower(): continue
+            if "_typeset" in file_path.lower():
+                continue
             item = QListWidgetItem(os.path.basename(file_path))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
 
             is_saved = self.main_app.check_if_saved(file_path)
             if is_saved:
-                item.setCheckState(Qt.Unchecked); item.setForeground(QColor("gray")); item.setText(f"{os.path.basename(file_path)} [SAVED]")
+                item.setCheckState(Qt.Unchecked)
+                item.setForeground(QColor("gray"))
+                item.setText(f"{os.path.basename(file_path)} [SAVED]")
             else:
                 item.setCheckState(Qt.Unchecked)
 
@@ -5453,44 +5865,63 @@ class BatchSaveDialog(QDialog):
             item = self.list_widget.item(i)
             file_path = item.data(Qt.UserRole)
             if not self.main_app.check_if_saved(file_path):
-                item.setCheckState(Qt.Checked); selected_count += 1
-                if selected_count >= count: break
+                item.setCheckState(Qt.Checked)
+                selected_count += 1
+                if selected_count >= count:
+                    break
 
     def select_all_unsaved(self):
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if not self.main_app.check_if_saved(item.data(Qt.UserRole)): item.setCheckState(Qt.Checked)
-            else: item.setCheckState(Qt.Unchecked)
+            if not self.main_app.check_if_saved(item.data(Qt.UserRole)):
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
 
     def deselect_all(self):
-        for i in range(self.list_widget.count()): self.list_widget.item(i).setCheckState(Qt.Unchecked)
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(Qt.Unchecked)
 
     def get_selected_files(self):
         selected = []
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if item.checkState() == Qt.Checked: selected.append(item.data(Qt.UserRole))
+            if item.checkState() == Qt.Checked:
+                selected.append(item.data(Qt.UserRole))
         return selected
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    try: import fitz
-    except ImportError: QMessageBox.critical(None, "Dependency Missing", "PyMuPDF not installed. 'pip install PyMuPDF'."); sys.exit()
+    try:
+        import fitz
+    except ImportError:
+        QMessageBox.critical(None, "Dependency Missing", "PyMuPDF not installed. 'pip install PyMuPDF'.")
+        sys.exit()
 
-    if not DEEPL_API_KEY or "your_deepl_key_here" in DEEPL_API_KEY: QMessageBox.warning(None, "DeepL API Key Missing", "Please provide your valid DeepL API key in 'config.ini'.")
-    if not GEMINI_API_KEY or "your_gemini_key_here" in GEMINI_API_KEY: QMessageBox.warning(None, "Gemini API Key Missing", "Please provide your valid Gemini API key in 'config.ini'.")
+    if not DEEPL_API_KEY or "your_deepl_key_here" in DEEPL_API_KEY:
+        QMessageBox.warning(None, "DeepL API Key Missing", "Please provide your valid DeepL API key in 'config.ini'.")
+    if not GEMINI_API_KEY or "your_gemini_key_here" in GEMINI_API_KEY:
+        QMessageBox.warning(None, "Gemini API Key Missing", "Please provide your valid Gemini API key in 'config.ini'.")
 
-    try: pytesseract.get_tesseract_version()
-    except Exception: QMessageBox.warning(None, "Tesseract Not Found", f"Tesseract not found at: {TESSERACT_PATH}\nPlease install it or correct the path in config.ini.")
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception:
+        QMessageBox.warning(None, "Tesseract Not Found", f"Tesseract not found at: {TESSERACT_PATH}\nPlease install it or correct the path in config.ini.")
 
-    if not MangaOcr: QMessageBox.warning(None, "Manga-OCR Not Found", "'pip install manga-ocr' to enable the Manga-OCR engine.")
-    if not onnxruntime: QMessageBox.warning(None, "ONNX Runtime Not Found", "'pip install onnxruntime' to enable some DL detectors.")
-    if not paddleocr: QMessageBox.warning(None, "PaddleOCR Not Found", "'pip install paddleocr paddlepaddle' to enable the PaddleOCR engine.")
-    if not YOLO: QMessageBox.warning(None, "Ultralytics Not Found", "'pip install ultralytics' to enable some DL detectors.")
-    # [BARU] Peringatan untuk dependensi inpainting
-    if not lama_cleaner: QMessageBox.warning(None, "Lama-Cleaner Not Found", "'pip install lama-cleaner' to enable advanced inpainting models.")
+    if not MangaOcr:
+        QMessageBox.warning(None, "Manga-OCR Not Found", "'pip install manga-ocr' to enable the Manga-OCR engine.")
+    if not onnxruntime:
+        QMessageBox.warning(None, "ONNX Runtime Not Found", "'pip install onnxruntime' to enable some DL detectors.")
+    if not paddleocr:
+        QMessageBox.warning(None, "PaddleOCR Not Found", "'pip install paddleocr paddlepaddle' to enable the PaddleOCR engine.")
+    if not YOLO:
+        QMessageBox.warning(None, "Ultralytics Not Found", "'pip install ultralytics' to enable some DL detectors.")
+    if not lama_cleaner:
+        QMessageBox.warning(None, "Lama-Cleaner Not Found", "'pip install lama-cleaner' to enable advanced inpainting models.")
 
     window = MangaOCRApp()
     window.showMaximized()
     sys.exit(app.exec_())
+
