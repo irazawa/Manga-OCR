@@ -1,23 +1,41 @@
-# Manga OCR & Typeset Tool v14.0.1
+# Manga OCR & Typeset Tool v14.1.0
 
-[![Version](https://img.shields.io/badge/version-14.0.1-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-14.1.0-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
----
+## v14.1.0 (Current)
 
-## v14.0.1 (Current)
+- **[MAJOR] OpenAI Prompt Caching (hemat biaya)**  
+  - Menambahkan `cache_control: {"type": "ephemeral"}` pada **system prompt** di endpoint Chat Completions.  
+  - Input tokens per request turun drastis (stabil ~300-an), karena system prompt tidak dihitung berulang.  
+  - UI menampilkan **Input/Output Tokens** per request & total, agar efek caching terlihat real-time.
 
-- **[MAJOR]** Added an “Add bubble” toggle in the manual selection toolkit to optionally auto-render a white bubble with a black outline on confirmation  
-- **[MAJOR]** Replaced inline editor with **AdvancedTextEditDialog**, supporting font/size/color controls, bold/italic/underline, alignment, line spacing, character spacing, margins, Bezier curve editing, manga-style effects (curved/wavy/jagged), orientation switching, and emoji insertion with partial text styling  
-- **[IMPROVEMENT]** Expanded `TypesetArea` to persist rich formatting metadata including bubble options, alignment, spacing, margins, effects, and per-segment styling with safe default fallbacks  
-- **[IMPROVEMENT]** Reworked the rendering pipeline to honor bubbles, inner margins, alignment, vertical/path-based text effects, and rich-text segments  
-- **[IMPROVEMENT]** Updated OCR worker flows to seed new `TypesetArea` instances with default advanced-layout options across batch and single-processing  
-- **[FIX]** Hooked edit actions into the new modal, applying user selections back into stored segments and resetting undo/redo cleanly  
+- **[MAJOR] API Status Panel — metrik lengkap & real-time**  
+  - Tambahan label: **Provider**, **Model**, **Input Tokens**, **Output Tokens**, **Total Tokens**, **Rate Input/Output** per token, **Translated Snippets (counter)**.  
+  - Tetap menampilkan **RPM / RPD**, **Cost (USD/IDR)**, dan **Active Workers**.
 
-## v14.0.0
+- **[MAJOR] Pricing & Costing akurat berbasis token (bukan karakter)**  
+  - `add_api_cost()` kini memakai data `response.usage.prompt_tokens` & `completion_tokens` (OpenAI) dan tabel harga per 1K token (untuk semua model).  
+  - Konversi **USD→IDR** dipertahankan; perhitungan granular per request + total.  
+  - Penyesuaian rate untuk model murah (gpt-5-nano/mini) vs Gemini 2.5 (Flash/Lite/Pro).
 
-- **[IMPROVEMENT]** Modernized UI/UX to be responsive and adaptive across all screen sizes (desktop, tablet, mobile), ensuring smooth navigation and consistent layout  
-- **[MAJOR]** Added a simple text editing modal: when users select an existing text, a modal window opens to edit text content directly, and after confirmation updates are applied back to the canvas  
-- **[MAJOR]** Added a new **AI Hardware** tab to organize and display hardware-related settings separately from the OCR and editing functions
+- **[MAJOR] Guardrails Gemini (stabilitas & biaya)**  
+  - Default `max_output_tokens=512` (bisa atur dari settings) untuk cegah over-output.  
+  - Opsi **safety_settings** dilonggarkan untuk kasus manga agar tidak sering terblokir.  
+  - **Fallback otomatis**: jika Gemini gagal (timeout/overthinking), langsung retry fallback ke OpenAI model yang ditentukan.  
+  - Peringatan & pencegahan untuk **batch via Gemini** (opsional: blokir batch Gemini atau pakai model whitelist).
+
+- **[MAJOR] Batch Routing Aware Provider (eksperimental, opsional)**  
+  - Logika batch menyesuaikan endpoint terbaik per provider (mis. OpenAI batch/batches bila tersedia, atau tetap single-call berantai dengan queue control).  
+  - Auto backoff & retry pada kasus rate-limit.
+
+- **[IMPROVEMENT] Translator hygiene**  
+  - Output sanitizer sederhana (hapus code fence & pembungkus) untuk memastikan hasil benar-benar “RAW plain text”.  
+  - Temperatur otomatis dinonaktifkan untuk model yang tidak mendukung (gpt-5-mini/nano).
+
+- **[FIX] Stability & UX**  
+  - Counter **Translated Snippets** naik hanya saat terjemahan sukses.  
+  - Minor typo pada changelog (“vv14.0.0”) **diperbaiki** → “v14.0.0”.  
+  - Reset Undo/Redo aman setelah apply hasil dari dialog editor.
 
 ---
 
@@ -391,4 +409,5 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 ---
 
 Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
+
 
