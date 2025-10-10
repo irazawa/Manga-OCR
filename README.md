@@ -1,204 +1,232 @@
-# Manga OCR & Typeset Tool v14.1.0
+# Manga OCR & Typeset Tool v14.5.11
 
-[![Version](https://img.shields.io/badge/version-14.1.0-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-14.5.11-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
-## v14.1.0 (Current)
+## v14.5.11 (Current)
 
-- **[MAJOR] OpenAI Prompt Caching (hemat biaya)**  
-  - Menambahkan `cache_control: {"type": "ephemeral"}` pada **system prompt** di endpoint Chat Completions.  
-  - Input tokens per request turun drastis (stabil ~300-an), karena system prompt tidak dihitung berulang.  
-  - UI menampilkan **Input/Output Tokens** per request & total, agar efek caching terlihat real-time.
+- **[MAJOR] Unified multi-engine OCR + AI-enhanced pipeline**
 
-- **[MAJOR] API Status Panel — metrik lengkap & real-time**  
-  - Tambahan label: **Provider**, **Model**, **Input Tokens**, **Output Tokens**, **Total Tokens**, **Rate Input/Output** per token, **Translated Snippets (counter)**.  
-  - Tetap menampilkan **RPM / RPD**, **Cost (USD/IDR)**, dan **Active Workers**.
+  - Both Standard and Enhanced pipelines are implemented in the worker layer:
+    - Standard: preprocessing → OCR → cleanup → translation (DeepL or AI) → post-process/naturalize
+    - Enhanced: Manga-OCR (raw crop) + Tesseract (preprocessed) combined, then AI merge/correction via a selected model
+  - AI translation is exposed via `translate_with_ai(...)` with provider/model, is_enhanced flag and `ocr_results` for improved context.
 
-- **[MAJOR] Pricing & Costing akurat berbasis token (bukan karakter)**  
-  - `add_api_cost()` kini memakai data `response.usage.prompt_tokens` & `completion_tokens` (OpenAI) dan tabel harga per 1K token (untuk semua model).  
-  - Konversi **USD→IDR** dipertahankan; perhitungan granular per request + total.  
-  - Penyesuaian rate untuk model murah (gpt-5-nano/mini) vs Gemini 2.5 (Flash/Lite/Pro).
+- **[MAJOR] Batch & Queue improvements**
 
-- **[MAJOR] Guardrails Gemini (stabilitas & biaya)**  
-  - Default `max_output_tokens=512` (bisa atur dari settings) untuk cegah over-output.  
-  - Opsi **safety_settings** dilonggarkan untuk kasus manga agar tidak sering terblokir.  
-  - **Fallback otomatis**: jika Gemini gagal (timeout/overthinking), langsung retry fallback ke OpenAI model yang ditentukan.  
-  - Peringatan & pencegahan untuk **batch via Gemini** (opsional: blokir batch Gemini atau pakai model whitelist).
+  - Dynamic worker queue (`QueueProcessorWorker`) processes jobs in parallel and emits thread-safe signals for UI updates.
+  - `BatchProcessorWorker` supports OpenAI batch endpoints and Gemini-style batched prompts with numbered-snippet parsing.
+  - Rate-limit awareness: workers call `wait_for_api_slot()` which polls `check_and_increment_usage()` and backoffs automatically before retrying.
 
-- **[MAJOR] Batch Routing Aware Provider (eksperimental, opsional)**  
-  - Logika batch menyesuaikan endpoint terbaik per provider (mis. OpenAI batch/batches bila tersedia, atau tetap single-call berantai dengan queue control).  
-  - Auto backoff & retry pada kasus rate-limit.
+- **[MAJOR] Robust API management & fallback**
 
-- **[IMPROVEMENT] Translator hygiene**  
-  - Output sanitizer sederhana (hapus code fence & pembungkus) untuk memastikan hasil benar-benar “RAW plain text”.  
-  - Temperatur otomatis dinonaktifkan untuk model yang tidak mendukung (gpt-5-mini/nano).
+  - Centralized API settings (`APIManagerPanel` / `SettingsCenterDialog`) and `refresh_api_clients()` to hot-reload keys.
+  - Automatic fallback behavior: AI translate failures fall back to non-AI translation (DeepL / configured fallback).
+  - OpenAI batch submission integration (`client.batches.create`) for large-page translation throughput.
 
-- **[FIX] Stability & UX**  
-  - Counter **Translated Snippets** naik hanya saat terjemahan sukses.  
-  - Minor typo pada changelog (“vv14.0.0”) **diperbaiki** → “v14.0.0”.  
-  - Reset Undo/Redo aman setelah apply hasil dari dialog editor.
+- **[IMPROVEMENT] Safety & content hygiene**
 
----
+  - Safe Mode filtering applied post-translation (configurable) to redact explicit words.
+  - Translation sanitizer strips fences and wrappers, ensuring raw text output for typesetting.
 
-## Pipeline Detail: Manga OCR & Typeset Tool v14.0.1
+- **[IMPROVEMENT] UX & typesetting features**
 
-Berikut adalah **pipeline detail** untuk alur sistem yang telah ditingkatkan:
+  - `AdvancedTextEditDialog` with per-segment rich styling, Bezier curve controls, and bubble rendering options.
+  - `SelectableImageLabel` supports transform (rotate/scale/move), pen/manual polygon selection, pending detection confirmation, and interactive handles.
+  - `BatchSaveWorker` for threaded export of typeset images (draws areas onto `QImage` and saves PNGs without blocking UI).
 
-### **1. Pipeline Utama Sistem**
+- **[IMPROVEMENT] Robust engine & dependency handling**
 
-```mermaid
-flowchart LR
-    A[Input] --> B[Preprocessing] --> C[OCR Multi-Engine] --> D[AI Enhancement] --> E[Translation] --> F[Glossary Integration] --> G[Typesetting] --> H[Output]
-```
-
-### **2. Pipeline Detail per Komponen**
-
-#### **A. Input & Manajemen Proyek**
-
-- **Tujuan**: Memuat sumber gambar/PDF dan mengelola proyek
-- **Komponen**:
-
-```mermaid
-flowchart LR
-    A1[File Dialog] --> A2[Load Image/PDF] --> A3[Deteksi Format] --> A4{PDF?}
-    A4 -->|Ya| A5[Ekstrak Halaman dengan PyMuPDF]
-    A4 -->|Tidak| A6[Konversi ke RGB dengan PIL]
-    A5 & A6 --> A7[Setup Project Directory]
-    A7 --> A8[Load Glossary dari JSON]
-```
-
-#### **B. Preprocessing Cerdas**
-
-- **Tujuan**: Optimalkan gambar untuk OCR dengan deteksi orientasi otomatis
-- **Komponen**:
-
-```mermaid
-flowchart LR
-    B1[Konversi ke Grayscale] --> B2[Deteksi Orientasi Otomatis] --> B3[Rotasi Korektif] --> B4[Adaptive Thresholding] --> B5[Denoising]
-```
-
-#### **C. OCR Multi-Engine dengan Fallback**
-
-- **Tujuan**: Ekstraksi teks dari gambar dengan engine terbaik untuk bahasa tertentu
-- **Engine & Strategi**:
-
-```mermaid
-flowchart TD
-    C1[Pilih Berdasarkan Bahasa] --> C2{Japanese?}
-    C2 -->|Ya| C3[Manga-OCR Prioritas]
-    C2 -->|Tidak| C4{Chinese/Korean?}
-    C4 -->|Ya| C5[PaddleOCR Prioritas]
-    C4 -->|Tidak| C6[Tesseract/EasyOCR]
-    C3 & C5 & C6 --> C7[Gabungkan Hasil jika Enhanced Pipeline]
-```
-
-#### **D. Enhanced AI Pipeline**
-
-- **Tujuan**: Tingkatkan akurasi dengan kombinasi Manga-OCR + Tesseract + Gemini
-- **Alur**:
-
-```mermaid
-flowchart LR
-    D1[Manga-OCR Result] --> D2[Tesseract Result] --> D3[Analisis & Merge dengan Gemini] --> D4[Koreksi OCR Errors] --> D5[Terjemahan Kontekstual]
-```
-
-#### **E. Sistem Glosarium AI-Powered**
-
-- **Tujuan**: Deteksi otomatis istilah penting dan pertahankan konsistensi terjemahan
-- **Alur**:
-
-```mermaid
-flowchart TD
-    E1[Original Text] --> E2[Translated Text] --> E3[AI Analysis Gemini]
-    E3 --> E4[Deteksi Proper Nouns] --> E5[Deteksi Unique Terms] --> E6[Deteksi Honorifics]
-    E4 & E5 & E6 --> E7[Generate Suggestions] --> E8[Update Glossary]
-    E8 --> E9[Integrasi ke Prompt Terjemahan]
-```
-
-#### **F. Dynamic Worker Pool**
-
-- **Tujuan**: Pemrosesan paralel untuk throughput maksimal
-- **Strategi**:
-
-```mermaid
-flowchart LR
-    F1[Job Queue] --> F2{Queue Size > Threshold?}
-    F2 -->|Ya| F3[Spawn New Worker]
-    F2 -->|Tidak| F4[Wait]
-    F3 --> F5[Process Job] --> F6[Signal Completion]
-    F6 --> F7[Update UI Thread-safe]
-```
-
-#### **G. Typesetting & Output**
-
-- **Tujuan**: Render teks terjemahan ke gambar dengan preservasi konteks visual
-- **Komponen**:
-
-```mermaid
-flowchart LR
-    G1[Inpainting Area Asli] --> G2[Deteksi Bubble Mask] --> G3[Font Scaling Adaptif] --> G4[Render Teks dengan Outline] --> G5[Simpan/Export]
-```
+  - Autodetect Tesseract on first-run; centralized `check_dependency()` and `ensure_dependencies()` helpers manage optional engines (Manga-OCR, PaddleOCR, RapidOCR, lama-cleaner, etc.).
+  - `FontManager` handles importing, registering, and listing custom fonts used by the typesetter.
 
 ---
 
-## Fitur Utama
+## Updated Pipeline (v14.5.11)
 
-### 1. OCR Multi-Engine Cerdas
-- **Manga-OCR** – Dioptimalkan untuk teks manga Jepang  
-- **EasyOCR** – Deteksi multi-bahasa dengan dukungan GPU  
-- **Tesseract** – Engine tradisional dengan dukungan bahasa luas  
-- **PaddleOCR** – Khusus untuk bahasa China/Korea (opsional)  
-- **Deteksi Orientasi Otomatis** dengan rotasi korektif  
+Below is a simplified flow that avoids mermaid parser quirks by keeping node labels short and avoiding special characters inside nodes.
 
-### 2. AI-Powered Translation & Enhancement
-- **Gemini Integration** untuk koreksi OCR dan terjemahan kontekstual  
-- **Enhanced Pipeline** dengan kombinasi Manga-OCR + Tesseract + Gemini  
-- **Style Selection**: Santai, Formal, Akrab, Vulgar/Dewasa, Sesuai Konteks Manga  
-- **Auto-censorship** untuk konten eksplisit ("vagina" → "meong", "penis" → "burung")  
+```mermaid
+flowchart LR
+  Input[Input]
+  Preproc[Preprocessing]
+  Detect{Mode}
+  Bubble[Bubble Detector]
+  Text[Text Detector]
+  Crop[Create Crop Jobs]
+  Queue[Job Queue]
+  Pool[Worker Pool]
+  Std[Standard Pipeline]
+  Enh[Enhanced Pipeline]
+  Typeset[Create TypesetArea]
+  Save[Save/Export]
+  Batch[Batch Processor]
 
-### 3. Dynamic Worker Pool
-- **Scalable Processing** – Hingga 15 worker thread paralel  
-- **Intelligent Scaling** – Worker baru dibuat berdasarkan ukuran antrian  
-- **Resource Management** – Worker otomatis dihentikan saat idle  
-- **Thread-safe UI Updates** – Pembaruan antarmuka yang aman dari thread  
+  Input --> Preproc --> Detect
+  Detect -->|bubble| Bubble --> Crop
+  Detect -->|text| Text --> Crop
+  Crop --> Queue --> Pool
+  Pool -->|standard| Std --> Typeset --> Save
+  Pool -->|enhanced| Enh --> Typeset --> Save
+  Pool -->|batch| Batch --> Typeset
+```
 
-### 4. Advanced Typesetting Tools
-- **Selection Tools**: Rectangle, Pen tool (polygon bebas), opsi bubble toggle  
-- **Advanced Text Editor Modal** – Kontrol font, ukuran, warna, alignment, spacing, margin, efek manga-style (curved, wavy, jagged), Bezier curve untuk teks melengkung, serta emoji  
-- **Vertical & Horizontal Typesetting** – Dukungan orientasi teks ganda  
-- **Inpainting Algorithms** – Navier-Stokes, Telea, dan Big-LAMA/Anime-Inpainting yang lebih natural  
+Key notes:
 
-### 5. Manajemen Proyek Lengkap
-- **Save/Load Project** (`.manga_proj`) dengan semua metadata  
-- **Autosave** setiap 5 menit  
-- **Batch Processing** – Proses seluruh folder sekaligus  
-- **PDF Support** – Buka, edit, dan ekspor PDF  
+- Detection: `AutoDetectorWorker` performs either bubble detection (DL model → mask → contours) or text detection (OCR boxes). Detected polygons are queued and may be confirmed by the user before creating jobs.
 
-### 6. API & Resource Management
-- **Multi-API Support** – Gemini (berbagai model) dan DeepL  
-- **Rate Limit Management** – Monitoring RPM/RPD real-time  
-- **Cost Tracking** – Pelacakan biaya API dalam USD dan IDR  
-- **Automatic Retry** – Mekanisme antrian saat limit tercapai  
+- Job execution (`QueueProcessorWorker`):
 
----
+  - Pulls crop jobs from `main_app.get_job_from_queue()`.
+  - Chooses pipeline per job based on `settings['enhanced_pipeline']`.
+  - Standard pipeline uses orientation-aware preprocessing for Latin scripts and preserves raw crops for Manga-OCR/AI OCR engines.
+  - Enhanced pipeline runs Manga-OCR on the raw crop and Tesseract on a preprocessed crop, then passes both results to AI (via `translate_with_ai`) for context-aware merge and correction.
 
-## Kelebihan v14.0.1
+- Translation & rate limits:
 
-**Kelebihan**
-- UI/UX lebih modern dan responsif, adaptif di semua ukuran layar (desktop, tablet, mobile)  
-- Advanced text editor modal dengan kontrol font, warna, efek manga-style, dan styling per kata  
-- Toggle bubble opsional untuk auto-render bubble putih dengan outline hitam  
-- Worker pool dinamis yang lebih stabil dan efisien untuk pemrosesan batch besar  
-- Pipeline rendering diperbarui untuk mendukung margin, alignment, spacing, serta teks vertikal maupun efek path-based  
+  - AI translation uses `translate_with_ai(...)` and respects provider/model rate limits with `wait_for_api_slot()`.
+  - `BatchProcessorWorker` groups page snippets and will use OpenAI batch endpoints when available or send a single batched prompt for Gemini-style providers.
 
-**Pertimbangan**
-- Konsumsi memori meningkat jika banyak worker aktif dan rich text digunakan  
-- Dependency lebih kompleks, termasuk kebutuhan GPU untuk performa optimal pada EasyOCR/PaddleOCR  
-- Biaya API berpotensi lebih tinggi dengan penggunaan AI translation intensif  
-- Learning curve lebih tinggi karena fitur editing lebih advance dibanding versi sebelumnya  
+- Persistence & exports:
+  - `ProjectSaveWorker` serializes the project atomically.
+  - `BatchSaveWorker` draws typeset areas onto images in a background thread and emits `file_saved` signals.
+
+This pipeline reflects the behavior implemented in `main.py` (workers, enhanced pipeline, batch handling, rate-limit wait/backoff, and typesetter integration).
 
 ---
 
-## Instalasi
+## Detailed Pipeline
+
+### 1) High-level pipeline
+
+```mermaid
+flowchart LR
+  A[Input] --> B[Preprocessing] --> C[OCR Engines] --> D[AI Merge/Enhance] --> E[Translation] --> F[Glossary] --> G[Typesetting] --> H[Output]
+```
+
+### 2) Components
+
+#### A. Input & Project Management
+
+- Purpose: Load images/PDFs and manage project state.
+- Components: File dialog, PyMuPDF extraction for PDF, setup project folder, glossary load.
+
+#### B. Smart Preprocessing
+
+- Purpose: Optimize images for OCR; includes orientation detection and corrective rotation, adaptive thresholding and denoising.
+
+#### C. Multi-engine OCR with fallback
+
+- Purpose: Extract text using best engine for the language.
+- Strategy: Manga-OCR prioritized for Japanese, PaddleOCR for Chinese/Korean, Tesseract/EasyOCR for general cases. Enhanced pipeline merges multiple OCR outputs when enabled.
+
+#### D. Enhanced AI pipeline
+
+- Purpose: Increase accuracy by combining Manga-OCR + Tesseract + AI correction/merging.
+
+```mermaid
+flowchart LR
+  M[Manga-OCR] --> Merge
+  T[Tesseract] --> Merge
+  Merge[AI Merge & Correct] --> Translate
+```
+
+## Example configuration snippets
+
+Here are minimal examples that match the application's `default_settings()` structure. Place `settings.json` next to `main.py` or copy values into the GUI settings panel.
+
+settings.json (minimal)
+
+```json
+{
+  "apis": {
+    "gemini": {
+      "keys": [
+        { "name": "gemini-1", "value": "YOUR_GEMINI_KEY", "active": true }
+      ]
+    },
+    "openai": { "keys": [] },
+    "deepl": { "keys": [] },
+    "google": { "keys": [] }
+  },
+  "tesseract": {
+    "path": "C:/Program Files/Tesseract-OCR/tesseract.exe",
+    "auto_detected": false
+  },
+  "cleanup": {
+    "use_background_box": true,
+    "use_inpaint": true,
+    "apply_mode": "selected",
+    "text_color_threshold": 128,
+    "auto_text_color": true
+  }
+}
+```
+
+config.ini (optional)
+
+```ini
+[API]
+DEEPL_KEY =
+GEMINI_KEY = YOUR_GEMINI_KEY
+OPENAI_KEY =
+
+[PATHS]
+TESSERACT_PATH = C:\Program Files\Tesseract-OCR\tesseract.exe
+
+[MODELS]
+BIG_LAMA_PATH = big-lama\models\best.ckpt
+ANIME_INPAINT_PATH = models\lama_large_512px.ckpt
+```
+
+## Example batch prompt (used by BatchProcessorWorker)
+
+This is an example of a safe, numbered batch prompt the application builds when sending multiple snippets in one call. The goal is to get a numbered output so parsing is deterministic.
+
+```
+You are an expert manga translator. Translate the following numbered snippets into natural, idiomatic Indonesian.
+
+Rules:
+- Keep numbering in your output. Each line must start with the original number (e.g., "1. ").
+- Only return the raw translated snippets (no commentary, no extra text).
+- If a snippet is untranslatable, return "[N/A]" after the number.
+
+Snippets:
+1. Hello, how are you?
+2. This is an example.
+3. Unreadable / malformed snippet
+
+Expected output (example):
+1. Hai, apa kabar?
+2. Ini adalah contoh.
+3. [N/A]
+```
+
+## Tests for batch parsing utility
+
+I added a simple parser at `batch_utils.py` and unit tests at `tests/test_batch_parse.py`.
+
+- Parser: `parse_numbered_translations(text)` — extracts numbered lines and returns a map {index: translation} and supports multiline entries.
+
+Running tests (PowerShell)
+
+1. Create and activate your virtual environment (Windows PowerShell):
+
+```powershell
+python -m venv venv
+; .\venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install pytest
+```
+
+2. Run pytest from the project root:
+
+```powershell
+pytest -q
+```
+
+If `pytest` is not installed globally, the above commands will set up and run tests inside the venv.
+
+---
 
 **Prasyarat**
 
@@ -361,17 +389,17 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 
 ## v14.0.1 (Current)
 
-- **[MAJOR]** Added an “Add bubble” toggle in the manual selection toolkit to optionally auto-render a white bubble with a black outline on confirmation  
-- **[MAJOR]** Replaced inline editor with **AdvancedTextEditDialog**, supporting font/size/color controls, bold/italic/underline, alignment, line spacing, character spacing, margins, Bezier curve editing, manga-style effects (curved/wavy/jagged), orientation switching, and emoji insertion with partial text styling  
-- **[IMPROVEMENT]** Expanded `TypesetArea` to persist rich formatting metadata including bubble options, alignment, spacing, margins, effects, and per-segment styling with safe default fallbacks  
-- **[IMPROVEMENT]** Reworked the rendering pipeline to honor bubbles, inner margins, alignment, vertical/path-based text effects, and rich-text segments  
-- **[IMPROVEMENT]** Updated OCR worker flows to seed new `TypesetArea` instances with default advanced-layout options across batch and single-processing  
-- **[FIX]** Hooked edit actions into the new modal, applying user selections back into stored segments and resetting undo/redo cleanly  
+- **[MAJOR]** Added an “Add bubble” toggle in the manual selection toolkit to optionally auto-render a white bubble with a black outline on confirmation
+- **[MAJOR]** Replaced inline editor with **AdvancedTextEditDialog**, supporting font/size/color controls, bold/italic/underline, alignment, line spacing, character spacing, margins, Bezier curve editing, manga-style effects (curved/wavy/jagged), orientation switching, and emoji insertion with partial text styling
+- **[IMPROVEMENT]** Expanded `TypesetArea` to persist rich formatting metadata including bubble options, alignment, spacing, margins, effects, and per-segment styling with safe default fallbacks
+- **[IMPROVEMENT]** Reworked the rendering pipeline to honor bubbles, inner margins, alignment, vertical/path-based text effects, and rich-text segments
+- **[IMPROVEMENT]** Updated OCR worker flows to seed new `TypesetArea` instances with default advanced-layout options across batch and single-processing
+- **[FIX]** Hooked edit actions into the new modal, applying user selections back into stored segments and resetting undo/redo cleanly
 
 ## vv14.0.0
 
-- **[IMPROVEMENT]** Modernized UI/UX to be responsive and adaptive across all screen sizes (desktop, tablet, mobile), ensuring smooth navigation and consistent layout  
-- **[MAJOR]** Added a simple text editing modal: when users select an existing text, a modal window opens to edit text content directly, and after confirmation updates are applied back to the canvas  
+- **[IMPROVEMENT]** Modernized UI/UX to be responsive and adaptive across all screen sizes (desktop, tablet, mobile), ensuring smooth navigation and consistent layout
+- **[MAJOR]** Added a simple text editing modal: when users select an existing text, a modal window opens to edit text content directly, and after confirmation updates are applied back to the canvas
 - **[MAJOR]** Added a new **AI Hardware** tab to organize and display hardware-related settings separately from the OCR and editing functions
 
 ## v13.0.1
@@ -409,5 +437,3 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 ---
 
 Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
-
-
