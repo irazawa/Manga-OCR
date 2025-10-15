@@ -1,4 +1,4 @@
-﻿# Manga OCR & Typeset Tool v14.3.4
+# Manga OCR & Typeset Tool v14.3.4
 # ==============================
 # ?? Import modul bawaan Python
 # ==============================
@@ -66,7 +66,8 @@ from PyQt5.QtGui import (
 from PyQt5.QtGui import QCursor
 from PyQt5.QtCore import (
     Qt, QRect, QPoint, pyqtSignal, QTimer, QThread, QObject,
-    QFileSystemWatcher, QRectF, QMutex, QPointF, QSignalBlocker, QSize
+    QFileSystemWatcher, QRectF, QMutex, QPointF, QSignalBlocker, QSize,
+    QBuffer, QIODevice
 )
 
 
@@ -189,6 +190,10 @@ def default_settings() -> dict:
             "auto_text_color": True,   # <— BARU: bisa dimatikan dari Settings
             # When true, debug/temp files created by AI OCR and MOFRL (under ./temp/) will be removed after a run
             "remove_ai_temp_files": False,
+            # If true, results from LaMA inpainting will be saved into the project's workshop folder.
+            # If false (default), the inpaint result is applied directly to the current image in-memory
+            # and not written to disk automatically.
+            "lama_save_to_workshop": False,
         },
         "typeset": {
             "outline_enabled": True,
@@ -453,10 +458,14 @@ SELECTION_MODE_LABELS = [
     "Manual Text (Rect)",
     "Manual Text (Pen)",
     "Pen Tool",
+    "Brush Inpaint (LaMA)",
     "Transform (Hand)"
 ]
 
-SELECTION_MODE_SHORTCUT_KEYS = ["7", "8", "3", "4", "5", "6", "2", "1"]
+SELECTION_MODE_SHORTCUT_KEYS = ["7", "8", "3", "4", "5", "6", "2", "0", "1"]
+
+DEFAULT_BIG_LAMA_ENDPOINT = SETTINGS.get('cleanup', {}).get('lama_endpoint', "http://127.0.0.1:5000/inpaint")
+DEFAULT_BIG_LAMA_MODEL = SETTINGS.get('cleanup', {}).get('lama_model', "cleaner")
 
 DEFAULT_SHORTCUTS = {
     'save_project': 'Ctrl+S',
@@ -3978,6 +3987,17 @@ class SelectableImageLabel(QLabel):
         self._transform_update_timer = QTimer(self)
         self._transform_update_timer.setSingleShot(True)
         self._transform_update_timer.timeout.connect(self._emit_transform_redraw)
+        # Inpainting brush state
+        self.brush_mask = None
+        self.brush_last_image_pos = None
+        self.is_brushing = False
+        self.brush_size = 45
+        self.brush_dirty = False
+        self._brush_mask_array = None
+        self.brush_color = QColor(255, 235, 59, 180)
+        self._brush_tint_cache = None
+        self._brush_cursor = None
+        self._cached_cursor_size = None
 
     def _set_active_transform(self, transform_data):
         self.active_transform = transform_data
@@ -4028,6 +4048,194 @@ class SelectableImageLabel(QLabel):
         if isinstance(result, QPointF):
             return result
         return None
+
+    def _create_brush_mask_storage(self, width, height):
+        if width <= 0 or height <= 0:
+            return False
+        self.brush_mask = QImage(width, height, QImage.Format_Alpha8)
+        self.brush_mask.fill(0)
+        try:
+            ptr = self.brush_mask.bits()
+            ptr.setsize(self.brush_mask.bytesPerLine() * height)
+            buffer = np.frombuffer(ptr, dtype=np.uint8)
+            buffer.setflags(write=True)
+            buffer = buffer.reshape((height, self.brush_mask.bytesPerLine()))
+            self._brush_mask_array = buffer[:, :width]
+        except Exception:
+            self._brush_mask_array = None
+            return False
+        self.brush_dirty = False
+        self._brush_tint_cache = None
+        return True
+
+    def _ensure_brush_mask(self):
+        if self.brush_mask is not None:
+            return True
+        base_pixmap = getattr(self.main_window, 'original_pixmap', None)
+        if base_pixmap and not base_pixmap.isNull():
+            size = base_pixmap.size()
+            return self._create_brush_mask_storage(size.width(), size.height())
+        pil_img = getattr(self.main_window, 'current_image_pil', None)
+        if pil_img is not None:
+            try:
+                width = int(getattr(pil_img, 'width', pil_img.size[0]))
+                height = int(getattr(pil_img, 'height', pil_img.size[1]))
+            except Exception:
+                width, height = pil_img.size if hasattr(pil_img, 'size') else (0, 0)
+            return self._create_brush_mask_storage(width, height)
+        return False
+
+    def reset_brush_mask(self):
+        self.brush_mask = None
+        self._brush_mask_array = None
+        self.brush_last_image_pos = None
+        self.is_brushing = False
+        self.brush_dirty = False
+        self._brush_tint_cache = None
+        self.update()
+        if self.main_window:
+            self.main_window.on_brush_mask_updated()
+
+    def clear_brush_mask(self):
+        if not self._ensure_brush_mask():
+            return
+        if self._brush_mask_array is not None:
+            self._brush_mask_array.fill(0)
+        self.brush_last_image_pos = None
+        self.is_brushing = False
+        self.brush_dirty = False
+        self._brush_tint_cache = None
+        self.update()
+        if self.main_window:
+            self.main_window.on_brush_mask_updated()
+
+    def stop_brush_session(self):
+        self.is_brushing = False
+        self.brush_last_image_pos = None
+
+    def has_brush_mask(self):
+        return bool(self.brush_mask is not None and self.brush_dirty)
+
+    def export_brush_mask(self):
+        if not self.has_brush_mask():
+            return None
+        return self.brush_mask.copy()
+
+    def _clamp_image_point(self, point):
+        if self.brush_mask is None:
+            return None
+        width = max(1, self.brush_mask.width())
+        height = max(1, self.brush_mask.height())
+        x = max(0.0, min(point.x(), width - 1))
+        y = max(0.0, min(point.y(), height - 1))
+        return QPointF(x, y)
+
+    def _paint_brush_segment(self, start_point, end_point=None):
+        if not self._ensure_brush_mask():
+            return
+        if self._brush_mask_array is None:
+            return
+        start = self._clamp_image_point(QPointF(start_point))
+        end = self._clamp_image_point(QPointF(end_point)) if end_point is not None else start
+        if start is None or end is None:
+            return
+        x1 = int(round(start.x()))
+        y1 = int(round(start.y()))
+        x2 = int(round(end.x()))
+        y2 = int(round(end.y()))
+        height, width = self._brush_mask_array.shape
+        x1 = max(0, min(x1, width - 1))
+        x2 = max(0, min(x2, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        y2 = max(0, min(y2, height - 1))
+        max_dimension = max(width, height)
+        thickness = max(1, min(int(round(self.brush_size)), max_dimension))
+        if x1 == x2 and y1 == y2:
+            cv2.circle(self._brush_mask_array, (x1, y1), max(1, thickness // 2), 255, thickness=-1, lineType=cv2.LINE_AA)
+        else:
+            cv2.line(self._brush_mask_array, (x1, y1), (x2, y2), 255, thickness=thickness, lineType=cv2.LINE_AA)
+            cv2.circle(self._brush_mask_array, (x2, y2), max(1, thickness // 2), 255, thickness=-1, lineType=cv2.LINE_AA)
+        self.brush_dirty = True
+        self._brush_tint_cache = None
+        if self.main_window:
+            self.main_window.on_brush_mask_updated()
+
+    def start_brush_stroke(self, image_point):
+        if image_point is None:
+            return
+        self.is_brushing = True
+        clamped = self._clamp_image_point(QPointF(image_point))
+        if clamped is None:
+            return
+        self.brush_last_image_pos = QPointF(clamped)
+        self._paint_brush_segment(clamped)
+        self.update()
+
+    def continue_brush_stroke(self, image_point):
+        if not self.is_brushing or self.brush_last_image_pos is None or image_point is None:
+            return
+        clamped = self._clamp_image_point(QPointF(image_point))
+        if clamped is None:
+            return
+        self._paint_brush_segment(self.brush_last_image_pos, clamped)
+        self.brush_last_image_pos = QPointF(clamped)
+        self.update()
+
+    def set_brush_size(self, size):
+        try:
+            size = int(size)
+        except Exception:
+            size = self.brush_size
+        size = max(2, min(size, 400))
+        if size == self.brush_size:
+            return
+        self.brush_size = size
+        self.stop_brush_session()
+        self._brush_tint_cache = None
+        self.update_brush_cursor()
+        self.update()
+
+    def update_brush_cursor(self):
+        if self.get_selection_mode() != "Brush Inpaint (LaMA)":
+            self._brush_cursor = None
+            self._cached_cursor_size = None
+            self.setCursor(Qt.CrossCursor)
+            return
+        zoom = getattr(self.main_window, 'zoom_factor', 1.0) or 1.0
+        diameter = max(6, int(round(self.brush_size * zoom)))
+        diameter = min(diameter, 256)
+        if self._brush_cursor is not None and self._cached_cursor_size == diameter:
+            self.setCursor(self._brush_cursor)
+            return
+        pm_size = diameter + 6
+        pixmap = QPixmap(pm_size, pm_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(255, 235, 59))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawEllipse(QRectF(3, 3, diameter, diameter))
+        painter.end()
+        hotspot = pm_size // 2
+        self._brush_cursor = QCursor(pixmap, hotspot, hotspot)
+        self._cached_cursor_size = diameter
+        self.setCursor(self._brush_cursor)
+
+    def _get_tinted_brush_image(self):
+        if self.brush_mask is None or not self.brush_dirty:
+            return None
+        if self._brush_tint_cache is None:
+            tinted = QImage(self.brush_mask.size(), QImage.Format_ARGB32_Premultiplied)
+            tinted.fill(Qt.transparent)
+            painter = QPainter(tinted)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(tinted.rect(), self.brush_color)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, self.brush_mask)
+            painter.end()
+            self._brush_tint_cache = tinted
+        return self._brush_tint_cache
 
     def _area_polygon(self, area):
         rect = QRectF(area.rect)
@@ -4603,14 +4811,25 @@ class SelectableImageLabel(QLabel):
         manual_rect = "Manual Text (Rect)" in mode
         manual_polygon = "Manual Text (Pen)" in mode
         pen_mode = (mode == "Pen Tool")
+        brush_mode = (mode == "Brush Inpaint (LaMA)")
         transform_mode = (mode == "Transform (Hand)")
 
         if transform_mode and not self.main_window.is_in_confirmation_mode:
             if self._handle_transform_mouse_press(event):
                 return
 
+        if brush_mode:
+            if self.main_window.is_in_confirmation_mode:
+                return
+            if event.button() == Qt.LeftButton:
+                image_point = self._widget_point_to_image(event.pos())
+                self.start_brush_stroke(image_point)
+                if self.main_window:
+                    self.main_window.update_selection_action_buttons(True)
+            return
+
         # If hovering over an existing area, allow area-level actions unless we're in pen/manual-pen mode
-        if self.hovered_area and not (pen_mode or manual_polygon or transform_mode):
+        if self.hovered_area and not (pen_mode or manual_polygon or brush_mode or transform_mode):
             if self.trash_icon_rect.contains(event.pos()):
                 if self.main_window.is_in_confirmation_mode: return
                 self.main_window.delete_typeset_area(self.hovered_area)
@@ -4658,7 +4877,7 @@ class SelectableImageLabel(QLabel):
                 self.hovered_area
                 and not self.trash_icon_rect.contains(event.pos())
                 and not self.edit_icon_rect.contains(event.pos())
-                and not (pen_mode or manual_polygon)
+                and not (pen_mode or manual_polygon or brush_mode)
             ):
                 if not self.main_window.is_in_confirmation_mode:
                     self.main_window.set_selected_area(self.hovered_area)
@@ -4686,12 +4905,13 @@ class SelectableImageLabel(QLabel):
                         print(f"[DEBUG] Added polygon point: {event.pos().x()},{event.pos().y()}")
                     except Exception:
                         pass
-                self.main_window.update_pen_tool_buttons_visibility(True)
+                self.main_window.update_selection_action_buttons(True)
             self.update()
     def mouseMoveEvent(self, event):
         self.current_mouse_pos = event.pos()
         mode = self.get_selection_mode()
         transform_mode = False
+        brush_mode = (mode == "Brush Inpaint (LaMA)")
 
         # Cek hover di atas ikon tong sampah untuk item yang menunggu
         if self.pending_bubble_polygon:
@@ -4699,6 +4919,11 @@ class SelectableImageLabel(QLabel):
             if self.hovering_pending_trash != new_hover_state:
                 self.hovering_pending_trash = new_hover_state
                 self.update() # Perbarui untuk mengubah warna ikon
+
+        if brush_mode and self.is_brushing and not self.main_window.is_in_confirmation_mode:
+            image_point = self._widget_point_to_image(event.pos())
+            self.continue_brush_stroke(image_point)
+            return
 
         if self.main_window.is_in_confirmation_mode:
             unzoomed_pos = self.main_window.unzoom_coords(self.current_mouse_pos, as_point=True)
@@ -4720,7 +4945,7 @@ class SelectableImageLabel(QLabel):
             manual_polygon = "Manual Text (Pen)" in mode
             pen_mode = (mode == "Pen Tool")
 
-            if pen_mode or manual_polygon:
+            if pen_mode or manual_polygon or brush_mode:
                 # In pen drawing modes we avoid changing hovered_area to prevent interference
                 new_hover_area = self.hovered_area
             else:
@@ -4768,6 +4993,7 @@ class SelectableImageLabel(QLabel):
                 self.update()
     def mouseReleaseEvent(self, event):
         mode = self.get_selection_mode()
+        brush_mode = (mode == "Brush Inpaint (LaMA)")
         # Allow app-level mouse shortcuts to intercept release events
         try:
             if getattr(self.main_window, 'dispatch_mouse_shortcut', None):
@@ -4786,6 +5012,15 @@ class SelectableImageLabel(QLabel):
                 self.main_window.confirm_pen_selection()
             else:
                 self.main_window.cancel_pen_selection()
+            return
+
+        if brush_mode and event.button() == Qt.LeftButton:
+            if self.is_brushing:
+                image_point = self._widget_point_to_image(event.pos())
+                self.continue_brush_stroke(image_point)
+            self.stop_brush_session()
+            if self.main_window:
+                self.main_window.on_brush_mask_updated()
             return
 
         if event.button() == Qt.LeftButton:
@@ -4915,6 +5150,23 @@ class SelectableImageLabel(QLabel):
                     r = QRect(pt.x() - 8, pt.y() - 8, 16, 16)
                     painter.drawEllipse(r)
         
+        if self.brush_mask is not None and self.brush_dirty and self.get_selection_mode() == "Brush Inpaint (LaMA)":
+            tinted_image = self._get_tinted_brush_image()
+            if tinted_image is not None:
+                painter.save()
+                pixmap = self.pixmap()
+                offset_x = offset_y = 0
+                if pixmap and not pixmap.isNull():
+                    label_size = self.size()
+                    pixmap_size = pixmap.size()
+                    offset_x = max(0, (label_size.width() - pixmap_size.width()) // 2)
+                    offset_y = max(0, (label_size.height() - pixmap_size.height()) // 2)
+                    painter.translate(offset_x, offset_y)
+                    zoom_factor = getattr(self.main_window, "zoom_factor", 1.0) or 1.0
+                    painter.scale(zoom_factor, zoom_factor)
+                painter.drawImage(0, 0, tinted_image)
+                painter.restore()
+
         # --- Gambar item yang menunggu konfirmasi ---
         if self.pending_bubble_polygon:
             painter.save()
@@ -5080,6 +5332,20 @@ class SelectableImageLabel(QLabel):
             except Exception:
                 pass
 
+        if self.get_selection_mode() == "Brush Inpaint (LaMA)" and self.current_mouse_pos:
+            image_point = self._widget_point_to_image(self.current_mouse_pos)
+            if image_point is not None:
+                painter.save()
+                center = QPointF(self.current_mouse_pos)
+                zoom = getattr(self.main_window, 'zoom_factor', 1.0) or 1.0
+                radius = max(3.0, (self.brush_size * zoom) / 2.0)
+                pen = QPen(QColor(255, 235, 59, 230))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(center, radius, radius)
+                painter.restore()
+
 
     def clear_selection(self):
         self.selection_start = None
@@ -5090,7 +5356,7 @@ class SelectableImageLabel(QLabel):
         self.current_mouse_pos = None
         # Jangan hapus item yang menunggu konfirmasi saat seleksi dibersihkan
         if self.main_window:
-            self.main_window.update_pen_tool_buttons_visibility(False)
+            self.main_window.update_selection_action_buttons(False)
         self.update()
 
 class MangaOCRApp(QMainWindow):
@@ -5977,9 +6243,14 @@ class MangaOCRApp(QMainWindow):
 
         self.selection_mode_combo.currentTextChanged.connect(self.selection_mode_changed)
         pen_buttons_layout = QHBoxLayout()
-        self.confirm_button = QPushButton("Confirm"); self.confirm_button.clicked.connect(self.confirm_pen_selection); self.confirm_button.setVisible(False)
-        self.cancel_button = QPushButton("Cancel"); self.cancel_button.clicked.connect(self.cancel_pen_selection); self.cancel_button.setVisible(False)
-        pen_buttons_layout.addWidget(self.confirm_button); pen_buttons_layout.addWidget(self.cancel_button)
+        self.selection_confirm_button = QPushButton("Confirm")
+        self.selection_confirm_button.clicked.connect(self._confirm_selection_action)
+        self.selection_confirm_button.setVisible(False)
+        self.selection_cancel_button = QPushButton("Cancel")
+        self.selection_cancel_button.clicked.connect(self._cancel_selection_action)
+        self.selection_cancel_button.setVisible(False)
+        pen_buttons_layout.addWidget(self.selection_confirm_button)
+        pen_buttons_layout.addWidget(self.selection_cancel_button)
         selection_layout.addLayout(pen_buttons_layout, 1, 0, 1, 2)
 
         self.create_bubble_checkbox = QCheckBox("Create white bubble with black outline")
@@ -6082,6 +6353,24 @@ class MangaOCRApp(QMainWindow):
 
         self.apply_all_button.clicked.connect(_on_apply_all_clicked)
         selection_layout.addWidget(self.apply_all_button, 5, 0, 1, 2)
+
+        # Brush size controls for inpainting mode
+        selection_layout.addWidget(QLabel("Brush Size:"), 6, 0)
+        brush_controls = QHBoxLayout()
+        brush_controls.setContentsMargins(0, 0, 0, 0)
+        self.brush_size_slider = QSlider(Qt.Horizontal)
+        self.brush_size_slider.setRange(5, 200)
+        initial_brush_size = getattr(self.image_label, 'brush_size', 45)
+        self.brush_size_slider.setValue(initial_brush_size)
+        self.brush_size_slider.valueChanged.connect(self._on_brush_size_slider_changed)
+        brush_controls.addWidget(self.brush_size_slider, 2)
+        self.brush_size_spin = QSpinBox()
+        self.brush_size_spin.setRange(5, 200)
+        self.brush_size_spin.setValue(initial_brush_size)
+        self.brush_size_spin.valueChanged.connect(self._on_brush_size_spin_changed)
+        brush_controls.addWidget(self.brush_size_spin)
+        selection_layout.addLayout(brush_controls, 6, 1, 1, 1)
+        self.image_label.set_brush_size(initial_brush_size)
 
         # Whenever apply-mode is toggled, save to SETTINGS
         def _on_apply_mode_changed():
@@ -8234,10 +8523,6 @@ class MangaOCRApp(QMainWindow):
                 f"You are an expert manga translator. Translate the user's text into clear, natural {target_lang} for narration or informational text. "
                 f"Keep it smooth, neutral, and suitable for manga narration boxes.\n"
                 f"IMPORTANT RULES:\n"
-                f"- If a Japanese text includes a kanji followed by parentheses like 漢字(かんじ) or word(note), treat the text inside parentheses as a reading or small note — do NOT translate it literally.\n"
-                f"- Translate only based on the main kanji meaning, not the content in parentheses.\n"
-                f"- Example: 勇者(ゆうしゃ) → translate as 'Hero', not 'Yuusha'.\n"
-                f"- Preserve parentheses if they indicate pronunciation notes or clarifications that exist in the original dialogue.\n"
                 f"- Avoid slang or overly casual tone.\n"
                 f"- Only output the final translation in {target_lang}.\n"
                 f"- No markdown, notes, or extra explanation.\n"
@@ -8248,10 +8533,6 @@ class MangaOCRApp(QMainWindow):
                 f"You are an expert manga translator. Translate the user's text into natural, fluent {target_lang} suitable for published manga dialogue. "
                 f"Keep the meaning, tone, and nuances from the original text.\n"
                 f"IMPORTANT RULES:\n"
-                f"- If the Japanese text contains kanji with parentheses — e.g. 漢字(かんじ) or name(note) — treat the content inside parentheses as furigana or reading aid, not as part of the dialogue.\n"
-                f"- Translate the main kanji normally, but ignore or omit the reading inside parentheses in the final translation.\n"
-                f"- Example: 神様(かみさま) → 'God', not 'Kamisama'.\n"
-                f"- If parentheses contain explanatory notes (not reading), keep them translated in parentheses in {target_lang}.\n"
                 f"- Use natural and neutral tone — not overly formal, but avoid slang or street language like 'lo', 'gue', or 'nih'.\n"
                 f"- Output ONLY the final translation in {target_lang}.\n"
                 f"- No quotes, markdown, or explanations.\n"
@@ -9588,6 +9869,8 @@ class MangaOCRApp(QMainWindow):
             self.typeset_areas = img_data['areas']
             self.redo_stack = img_data['redo']
             self.set_selected_area(None, notify=True)
+            if hasattr(self, 'image_label') and self.image_label:
+                self.image_label.reset_brush_mask()
 
             self.rebuild_history_for_image(key, self.typeset_areas)
             self.redraw_all_typeset_areas()
@@ -9635,6 +9918,8 @@ class MangaOCRApp(QMainWindow):
         self.typeset_areas = img_data['areas']
         self.redo_stack = img_data['redo']
         self.set_selected_area(None, notify=True)
+        if hasattr(self, 'image_label') and self.image_label:
+            self.image_label.reset_brush_mask()
 
         self.rebuild_history_for_image(key, self.typeset_areas)
         self.redraw_all_typeset_areas()
@@ -9651,6 +9936,136 @@ class MangaOCRApp(QMainWindow):
             return f"{path_to_use}::page::{page_to_use}"
         return path_to_use
 
+    def _ensure_workshop_dir(self):
+        base_dir = None
+        if self.project_dir and os.path.isdir(self.project_dir):
+            base_dir = self.project_dir
+        elif self.current_image_path:
+            base_dir = os.path.dirname(self.current_image_path)
+        else:
+            base_dir = os.getcwd()
+        workshop_dir = os.path.join(base_dir, "workshop")
+        os.makedirs(workshop_dir, exist_ok=True)
+        return workshop_dir
+
+    def _ensure_inpaint_temp_dir(self):
+        """
+        Create (if needed) the temp/inpainting directory inside the active project.
+        Returns the absolute path to that directory.
+        """
+        base_dir = self.project_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else os.getcwd())
+        temp_root = os.path.join(base_dir, "temp")
+        inpaint_dir = os.path.join(temp_root, "inpainting")
+        try:
+            os.makedirs(inpaint_dir, exist_ok=True)
+        except Exception as exc:
+            raise RuntimeError(f"Gagal membuat folder inpainting: {exc}") from exc
+        return inpaint_dir
+
+    def _write_inpaint_result_copy(self, image_bytes: bytes, output_ext: str) -> str | None:
+        """
+        Persist an extra copy of the inpaint result directly in the active project directory
+        (or alongside the current image if no project is active). The file is suffixed with
+        `_cleanup_YYYYmmdd_HHMMSS` so the original asset is untouched.
+        """
+        try:
+            base_dir = self.project_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else os.getcwd())
+            output_dir = os.path.join(base_dir, "inpainting")
+            os.makedirs(output_dir, exist_ok=True)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if self.current_image_path:
+                base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+            else:
+                base_name = "inpaint"
+            copy_filename = f"{base_name}_cleanup_{timestamp}{output_ext}"
+            copy_path = os.path.join(output_dir, copy_filename)
+
+            with open(copy_path, 'wb') as handle:
+                handle.write(image_bytes)
+            return copy_path
+        except Exception as exc:
+            self.statusBar().showMessage(f"Failed to store inpaint copy: {exc}", 6000)
+            return None
+
+    def _copy_mask_to_project(self, mask_path: str) -> str | None:
+        """
+        Copy the saved mask PNG into the project-level inpainting folder so the user can inspect
+        which pixels were brushed. A timestamped filename is used to avoid collisions.
+        """
+        if not mask_path or not os.path.exists(mask_path):
+            return None
+        try:
+            base_dir = self.project_dir or (os.path.dirname(self.current_image_path) if self.current_image_path else os.getcwd())
+            output_dir = os.path.join(base_dir, "inpainting")
+            os.makedirs(output_dir, exist_ok=True)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if self.current_image_path:
+                base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+            else:
+                base_name = "inpaint"
+            dest_path = os.path.join(output_dir, f"{base_name}_mask_{timestamp}.png")
+            shutil.copy2(mask_path, dest_path)
+            return dest_path
+        except Exception as exc:
+            self.statusBar().showMessage(f"Failed to copy inpaint mask: {exc}", 6000)
+            return None
+
+    def _save_brush_inpaint_artifacts(self, mask_image, image_bytes, output_ext):
+        """
+        Save the brush mask and resulting inpaint image to the temp/inpainting folder.
+        Returns a tuple (mask_path, output_path) if successful.
+        """
+        try:
+            out_dir = self._ensure_inpaint_temp_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(str(exc), 6000)
+            return None, None
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        if self.current_image_path:
+            base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+        else:
+            base_name = "inpaint"
+
+        mask_filename = f"{base_name}_mask_{timestamp}.png"
+        cleanup_filename = f"{base_name}_cleanup_{timestamp}{output_ext}"
+        mask_path = os.path.join(out_dir, mask_filename)
+        cleanup_path = os.path.join(out_dir, cleanup_filename)
+
+        counter = 1
+        while os.path.exists(mask_path):
+            mask_path = os.path.join(out_dir, f"{base_name}_mask_{timestamp}_{counter}.png")
+            counter += 1
+
+        counter = 1
+        while os.path.exists(cleanup_path):
+            cleanup_path = os.path.join(out_dir, f"{base_name}_cleanup_{timestamp}_{counter}{output_ext}")
+            counter += 1
+
+        try:
+            mask_to_save = mask_image
+            if isinstance(mask_to_save, QImage) and mask_to_save.format() not in (
+                QImage.Format_Grayscale8,
+                QImage.Format_Alpha8,
+            ):
+                mask_to_save = mask_to_save.convertToFormat(QImage.Format_Grayscale8)
+            if isinstance(mask_to_save, QImage):
+                if not mask_to_save.save(mask_path, "PNG"):
+                    raise RuntimeError("Mask LaMA gagal disimpan ke disk.")
+            else:
+                with open(mask_path, 'wb') as mask_file:
+                    mask_file.write(mask_to_save)
+
+            with open(cleanup_path, 'wb') as fout:
+                fout.write(image_bytes)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Gagal menyimpan hasil inpainting: {exc}", 6000)
+            return None, None
+
+        return mask_path, cleanup_path
+
     def clear_view(self):
         # Clear pixmaps and data safely while preventing concurrent painting
         self.paint_mutex.lock()
@@ -9664,6 +10079,8 @@ class MangaOCRApp(QMainWindow):
         finally:
             self.paint_mutex.unlock()
         self.clear_selected_area()
+        if hasattr(self, 'image_label') and self.image_label:
+            self.image_label.reset_brush_mask()
 
         self.update_display()
 
@@ -9716,6 +10133,8 @@ class MangaOCRApp(QMainWindow):
         scaled_size = pix_copy.size() * self.zoom_factor
         scaled_pixmap = pix_copy.scaled(scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(scaled_pixmap); self.image_label.adjustSize()
+        if hasattr(self.image_label, 'update_brush_cursor'):
+            self.image_label.update_brush_cursor()
 
     def zoom_in(self):
         self.zoom_factor = min(self.zoom_factor + 0.2, 8.0); self.update_display()
@@ -10609,7 +11028,7 @@ class MangaOCRApp(QMainWindow):
         self.refresh_history_views()
         self.statusBar().showMessage("Manual text added.", 3000)
         self.image_label.clear_selection()
-        self.update_pen_tool_buttons_visibility(False)
+        self.update_selection_action_buttons(False)
 
     def set_transform_preview_active(self, active: bool):
         """Toggle lightweight rendering mode while the user drags or rotates a text area."""
@@ -11662,6 +12081,7 @@ class MangaOCRApp(QMainWindow):
         self.image_label.cancel_pending_item()
         manual_polygon = "Manual Text (Pen)" in mode
         pen_mode = (mode == "Pen Tool") or manual_polygon
+        brush_mode = (mode == "Brush Inpaint (LaMA)")
         rect_mode = ("Rect" in mode or "Oval" in mode) and not manual_polygon
         transform_mode = (mode == "Transform (Hand)")
         self.image_label.set_transform_mode(transform_mode)
@@ -11670,11 +12090,24 @@ class MangaOCRApp(QMainWindow):
             if not self.pen_cursor:
                 self.pen_cursor = self.create_pen_cursor()
             self.image_label.setCursor(self.pen_cursor)
+        elif brush_mode:
+            self.image_label.clear_brush_mask()
+            self.image_label.update_brush_cursor()
         elif transform_mode:
             self.image_label.setCursor(Qt.OpenHandCursor)
         else:
             self.image_label.setCursor(Qt.CrossCursor if rect_mode else Qt.PointingHandCursor)
-        self.update_pen_tool_buttons_visibility(pen_mode)
+
+        if brush_mode:
+            self.selection_confirm_button.setText("Confirm Cleanup")
+            self.selection_cancel_button.setText("Reset Brush")
+        else:
+            self.selection_confirm_button.setText("Confirm")
+            self.selection_cancel_button.setText("Cancel")
+
+        self.update_selection_action_buttons(pen_mode or brush_mode)
+        if not brush_mode:
+            self.image_label.stop_brush_session()
         if not pen_mode:
             self.image_label.polygon_points.clear()
             self.image_label.update()
@@ -11726,8 +12159,54 @@ class MangaOCRApp(QMainWindow):
         hotspot_y = 6
         return QCursor(pm, hotspot_x, hotspot_y)
 
-    def update_pen_tool_buttons_visibility(self, visible):
-        self.confirm_button.setVisible(visible); self.cancel_button.setVisible(visible)
+    def update_selection_action_buttons(self, visible):
+        self.selection_confirm_button.setVisible(visible)
+        self.selection_cancel_button.setVisible(visible)
+        if not visible:
+            self.selection_confirm_button.setEnabled(False)
+            return
+        if self.selection_mode_combo.currentText() == "Brush Inpaint (LaMA)":
+            self.on_brush_mask_updated()
+        else:
+            self.selection_confirm_button.setEnabled(True)
+
+    def _confirm_selection_action(self):
+        mode = self.selection_mode_combo.currentText()
+        if mode == "Pen Tool" or "Manual Text (Pen)" in mode:
+            self.confirm_pen_selection()
+        elif mode == "Brush Inpaint (LaMA)":
+            self.confirm_brush_inpaint()
+
+    def _cancel_selection_action(self):
+        mode = self.selection_mode_combo.currentText()
+        if mode == "Pen Tool" or "Manual Text (Pen)" in mode:
+            self.cancel_pen_selection()
+        elif mode == "Brush Inpaint (LaMA)":
+            self.cancel_brush_inpaint()
+        else:
+            self.update_selection_action_buttons(False)
+
+    def on_brush_mask_updated(self):
+        if self.selection_mode_combo.currentText() != "Brush Inpaint (LaMA)":
+            return
+        has_mask = False
+        if hasattr(self, 'image_label') and self.image_label:
+            has_mask = self.image_label.has_brush_mask()
+        self.selection_confirm_button.setEnabled(has_mask)
+
+    def _on_brush_size_slider_changed(self, value):
+        if getattr(self, 'brush_size_spin', None):
+            with QSignalBlocker(self.brush_size_spin):
+                self.brush_size_spin.setValue(value)
+        if getattr(self, 'image_label', None):
+            self.image_label.set_brush_size(value)
+            self.image_label.update_brush_cursor()
+
+    def _on_brush_size_spin_changed(self, value):
+        if getattr(self, 'brush_size_slider', None):
+            with QSignalBlocker(self.brush_size_slider):
+                self.brush_size_slider.setValue(value)
+        self._on_brush_size_slider_changed(value)
 
     def confirm_pen_selection(self):
         points = self.image_label.get_polygon_points()
@@ -11736,7 +12215,263 @@ class MangaOCRApp(QMainWindow):
 
     def cancel_pen_selection(self):
         self.image_label.clear_selection()
-        self.update_pen_tool_buttons_visibility(False)
+        self.update_selection_action_buttons(False)
+
+    def confirm_brush_inpaint(self):
+        if not getattr(self, 'image_label', None):
+            return
+        mask_image = self.image_label.export_brush_mask()
+        if mask_image is None:
+            QMessageBox.warning(self, "Mask Kosong", "Buat mask terlebih dahulu dengan Brush Inpaint sebelum mengirim.")
+            return
+        mask_for_save = mask_image.copy()
+        if self.current_image_pil is None:
+            QMessageBox.warning(self, "Tidak Ada Gambar", "Tidak ada gambar aktif untuk diproses.")
+            return
+
+        try:
+            mask_buffer = QBuffer()
+            if not mask_buffer.open(QIODevice.WriteOnly):
+                raise RuntimeError("Mask buffer tidak bisa dibuka.")
+            if not mask_image.save(mask_buffer, "PNG"):
+                raise RuntimeError("Mask tidak bisa dikonversi menjadi PNG.")
+            mask_bytes = bytes(mask_buffer.data())
+        except Exception as exc:
+            QMessageBox.critical(self, "Mask Error", f"Gagal menyiapkan mask untuk dikirim:\n{exc}")
+            return
+
+        try:
+            image_buffer = io.BytesIO()
+            self.current_image_pil.save(image_buffer, format="PNG")
+            image_bytes = image_buffer.getvalue()
+        except Exception as exc:
+            QMessageBox.critical(self, "Image Error", f"Gagal menyiapkan gambar asli:\n{exc}")
+            return
+
+        cleanup_cfg = SETTINGS.get('cleanup', {})
+        endpoint = cleanup_cfg.get('lama_endpoint') or DEFAULT_BIG_LAMA_ENDPOINT
+        model_name = cleanup_cfg.get('lama_model') or DEFAULT_BIG_LAMA_MODEL
+
+        files = {
+            'image': ('image.png', image_bytes, 'image/png'),
+            'mask': ('mask.png', mask_bytes, 'image/png')
+        }
+        # lama_cleaner expects many form fields. If they're missing, the server will return 400 (Bad Request)
+        # Provide sensible defaults mirroring the frontend defaults so the endpoint accepts the request.
+        data = {
+            'model': model_name or DEFAULT_BIG_LAMA_MODEL,
+            # LDM / HD settings
+            'ldmSteps': '25',
+            'ldmSampler': 'plms',
+            'zitsWireframe': 'true',
+            'hdStrategy': 'Crop',
+            'hdStrategyCropMargin': '128',
+            # Note: server uses the misspelled key 'hdStrategyCropTrigerSize'
+            'hdStrategyCropTrigerSize': '512',
+            'hdStrategyResizeLimit': '1080',
+            # Prompts
+            'prompt': '',
+            'negativePrompt': '',
+            # Cropper
+            'useCroper': 'false',
+            'croperX': '0',
+            'croperY': '0',
+            'croperHeight': '0',
+            'croperWidth': '0',
+            # SD params
+            'sdScale': '100',
+            'sdMaskBlur': '5',
+            'sdStrength': '0.75',
+            'sdSteps': '50',
+            'sdGuidanceScale': '7.5',
+            'sdSampler': 'uni_pc',
+            'sdSeed': '42',
+            'sdMatchHistograms': 'false',
+            # OpenCV inpaint flags
+            'cv2Flag': '1',
+            'cv2Radius': '5',
+            # Paint by example / p2p
+            'paintByExampleSteps': '50',
+            'paintByExampleGuidanceScale': '7.5',
+            'paintByExampleMaskBlur': '5',
+            'paintByExampleSeed': '42',
+            'paintByExampleMatchHistograms': 'false',
+            'p2pSteps': '50',
+            'p2pImageGuidanceScale': '1.5',
+            'p2pGuidanceScale': '7.5',
+            # Controlnet
+            'controlnet_conditioning_scale': '0.4',
+            'controlnet_method': ''
+        }
+
+        prev_enabled = self.selection_confirm_button.isEnabled()
+        self.selection_confirm_button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        response = None
+        error = None
+        try:
+            response = requests.post(endpoint, files=files, data=data, timeout=120)
+            response.raise_for_status()
+        except Exception as exc:
+            error = exc
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if error:
+            self.selection_confirm_button.setEnabled(prev_enabled)
+            QMessageBox.critical(self, "Inpaint Gagal", f"Gagal menghubungi Big-LaMA ({endpoint}):\n{error}")
+            return
+
+        content_type = (response.headers.get('Content-Type') or '').lower()
+        output_ext = ".png"
+        image_bytes = b''
+
+        if 'application/json' in content_type:
+            try:
+                payload = response.json()
+            except Exception as exc:
+                self.selection_confirm_button.setEnabled(prev_enabled)
+                QMessageBox.critical(self, "Respon Tidak Valid", f"Gagal membaca respon JSON dari server:\n{exc}")
+                return
+            image_b64 = None
+            for key in ('image', 'result', 'data', 'png', 'output'):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    image_b64 = value
+                    break
+            if not image_b64:
+                self.selection_confirm_button.setEnabled(prev_enabled)
+                QMessageBox.critical(self, "Respon Tidak Valid", "Respon JSON tidak mengandung field gambar (image/result/data).")
+                return
+            try:
+                image_bytes = base64.b64decode(image_b64)
+            except Exception as exc:
+                self.selection_confirm_button.setEnabled(prev_enabled)
+                QMessageBox.critical(self, "Decode Error", f"Gagal decode data gambar dari server:\n{exc}")
+                return
+        else:
+            image_bytes = response.content or b''
+            if 'jpeg' in content_type or 'jpg' in content_type:
+                output_ext = ".jpg"
+
+        if not image_bytes:
+            self.selection_confirm_button.setEnabled(prev_enabled)
+            QMessageBox.critical(self, "Inpaint Gagal", "Server tidak mengembalikan data gambar.")
+            return
+
+        saved_mask_path, saved_cleanup_path = self._save_brush_inpaint_artifacts(mask_for_save, image_bytes, output_ext)
+        project_copy_path = self._write_inpaint_result_copy(image_bytes, output_ext)
+        project_mask_copy_path = self._copy_mask_to_project(saved_mask_path) if saved_mask_path else None
+        status_parts = []
+        if saved_mask_path:
+            status_parts.append(f"Mask: {saved_mask_path}")
+        if saved_cleanup_path:
+            status_parts.append(f"Temp cleanup: {saved_cleanup_path}")
+        if project_copy_path:
+            status_parts.append(f"Inpainting copy: {project_copy_path}")
+        if project_mask_copy_path:
+            status_parts.append(f"Mask copy: {project_mask_copy_path}")
+        if status_parts:
+            self.statusBar().showMessage(" | ".join(status_parts), 6000)
+        else:
+            self.statusBar().showMessage("Brush inpainting completed.", 5000)
+
+        # Decide whether to save to workshop or apply in-memory
+        save_to_workshop = bool(SETTINGS.get('cleanup', {}).get('lama_save_to_workshop', False))
+
+        if save_to_workshop:
+            workshop_dir = self._ensure_workshop_dir()
+            original_name = "inpaint"
+            if self.current_image_path:
+                original_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+            base_name = f"{original_name}_cleanup"
+            output_path = os.path.join(workshop_dir, base_name + output_ext)
+            counter = 1
+            while os.path.exists(output_path):
+                output_path = os.path.join(workshop_dir, f"{base_name}_{counter}{output_ext}")
+                counter += 1
+
+            try:
+                with open(output_path, 'wb') as fout:
+                    fout.write(image_bytes)
+            except Exception as exc:
+                self.selection_confirm_button.setEnabled(prev_enabled)
+                QMessageBox.critical(self, "Save Error", f"Gagal menyimpan hasil inpaint:\n{exc}")
+                return
+
+            self.image_label.clear_brush_mask()
+            workshop_msg = f"Hasil LaMA Cleaner tersimpan di:\n{output_path}"
+            status_msg = f"Hasil inpainting disimpan di {output_path}"
+            if saved_mask_path:
+                workshop_msg += f"\nMask: {saved_mask_path}"
+                status_msg += f" | Mask: {saved_mask_path}"
+            if saved_cleanup_path and os.path.abspath(saved_cleanup_path) != os.path.abspath(output_path):
+                workshop_msg += f"\nSalinan temp: {saved_cleanup_path}"
+                status_msg += f" | Salinan temp: {saved_cleanup_path}"
+            if project_copy_path and os.path.abspath(project_copy_path) != os.path.abspath(output_path):
+                workshop_msg += f"\nSalinan proyek: {project_copy_path}"
+                status_msg += f" | Salinan proyek: {project_copy_path}"
+            if project_mask_copy_path and os.path.abspath(project_mask_copy_path) != os.path.abspath(output_path):
+                workshop_msg += f"\nMask proyek: {project_mask_copy_path}"
+                status_msg += f" | Mask proyek: {project_mask_copy_path}"
+            self.statusBar().showMessage(status_msg, 6000)
+            QMessageBox.information(self, "Inpainting Selesai", workshop_msg)
+            self.update_selection_action_buttons(True)
+        else:
+            # Apply the returned image bytes to current image in-memory and refresh display
+            try:
+                pil_img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+                # Update in-memory image and pixmap safely
+                self.paint_mutex.lock()
+                try:
+                    self.current_image_pil = pil_img
+                    data = pil_img.tobytes('raw', 'RGB')
+                    qimage = QImage(data, pil_img.width, pil_img.height, pil_img.width * 3, QImage.Format_RGB888)
+                    self.original_pixmap = QPixmap.fromImage(qimage)
+                    # Reset typeset/overlay state since base image changed
+                    self.typeset_areas = []
+                    self.redo_stack = []
+                    self.set_selected_area(None, notify=True)
+                    if hasattr(self, 'image_label') and self.image_label:
+                        self.image_label.reset_brush_mask()
+                finally:
+                    self.paint_mutex.unlock()
+
+                # Refresh display and UI
+                self.rebuild_history_for_image(self.get_current_data_key(), self.typeset_areas)
+                self.redraw_all_typeset_areas()
+                self.update_undo_redo_buttons_state()
+                self._refresh_detection_overlay()
+                self.refresh_history_views()
+                self.image_label.clear_brush_mask()
+                status_text = "Inpainting berhasil dan diterapkan pada gambar saat ini."
+                dialog_text = status_text
+                if saved_mask_path:
+                    status_text += f" | Mask: {saved_mask_path}"
+                    dialog_text += f"\nMask: {saved_mask_path}"
+                if saved_cleanup_path:
+                    status_text += f" | Salinan: {saved_cleanup_path}"
+                    dialog_text += f"\nSalinan hasil: {saved_cleanup_path}"
+                if project_copy_path:
+                    status_text += f" | Salinan proyek: {project_copy_path}"
+                    dialog_text += f"\nSalinan proyek: {project_copy_path}"
+                if project_mask_copy_path:
+                    status_text += f" | Mask proyek: {project_mask_copy_path}"
+                    dialog_text += f"\nMask proyek: {project_mask_copy_path}"
+                self.statusBar().showMessage(status_text, 6000)
+                QMessageBox.information(self, "Inpainting Selesai", dialog_text)
+                self.update_selection_action_buttons(True)
+            except Exception as exc:
+                self.selection_confirm_button.setEnabled(prev_enabled)
+                QMessageBox.critical(self, "Apply Error", f"Gagal menerapkan hasil inpaint ke memori:\n{exc}")
+                return
+
+    def cancel_brush_inpaint(self):
+        if not getattr(self, 'image_label', None):
+            return
+        self.image_label.clear_brush_mask()
+        self.statusBar().showMessage("Mask inpainting dibersihkan.", 2500)
+        self.update_selection_action_buttons(True)
 
     def save_image(self):
         if not self.typeset_pixmap: QMessageBox.warning(self, "No Image", "There is no image to save."); return
@@ -13738,23 +14473,13 @@ class MangaOCRApp(QMainWindow):
         image_b64 = base64.b64encode(buffer.tobytes()).decode('utf-8')
 
         prompt_text = (
-            "Task: Optical Character Recognition (OCR) for Japanese text.\n"
-            "Input: an image.\n"
-            "Output: ONLY the recognized text in natural reading order.\n\n"
+            "Task: OCR. Input: an image. Output: ONLY the text in the image.\n\n"
             "Rules:\n"
-            "- Do NOT explain or add any commentary.\n"
-            "- Do NOT output markdown or formatting symbols.\n"
-            "- Keep line breaks if they appear in the original image.\n"
-            "- Preserve punctuation (。, 、, …, !, ? etc.).\n"
-            "- When a small note or furigana is written next to a kanji, output it in parentheses after the kanji.\n"
-            "  Example: 漢字 + note → 漢字(note)\n"
-            "- If the note appears *before* the kanji (vertically aligned text), treat it the same way: 漢字(note).\n"
-            "- If the note is unrelated annotation or translation note, also wrap it in parentheses.\n"
-            "- Do NOT merge notes and kanji into a single block like [note][kanji].\n"
-            "- Do NOT drop ellipses (…)\n"
-            "- Just return the plain text with correct kanji-note pairing."
+            "- No explanations.\n"
+            "- No markdown.\n"
+            "- No formatting.\n"
+            "- Just return the plain text."
         )
-
         data_url = f"data:image/png;base64,{image_b64}"
 
         # Prepare several payload variants to account for provider schema differences.
@@ -13951,22 +14676,12 @@ class MangaOCRApp(QMainWindow):
             image_b64 = base64.b64encode(buffer).decode('utf-8')
 
             prompt = (
-                "Task: Optical Character Recognition (OCR) for Japanese text.\n"
-                "Input: an image.\n"
-                "Output: ONLY the recognized text in natural reading order.\n\n"
-                "Rules:\n"
-                "- Do NOT explain or add any commentary.\n"
-                "- Do NOT output markdown or formatting symbols.\n"
-                "- Keep line breaks if they appear in the original image.\n"
-                "- Preserve punctuation (。, 、, …, !, ? etc.).\n"
-                "- When a small note or furigana is written next to a kanji, output it in parentheses after the kanji.\n"
-                "  Example: 漢字 + note → 漢字(note)\n"
-                "- If the note appears *before* the kanji (vertically aligned text), treat it the same way: 漢字(note).\n"
-                "- If the note is unrelated annotation or translation note, also wrap it in parentheses.\n"
-                "- Do NOT merge notes and kanji into a single block like [note][kanji].\n"
-                "- Do NOT drop ellipses (…)\n"
-                "- Just return the plain text with correct kanji-note pairing."
+                "This is a clear scanned image containing printed text.\n"
+                "Your task is to carefully read every visible word and return the exact text as plain text.\n"
+                "Keep line breaks and spacing the same.\n"
+                "Do not summarize, describe, or reason — just return the literal text you can read."
             )
+
             # Prepare temp debug folder
             temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
             try:
