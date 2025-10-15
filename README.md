@@ -1,43 +1,38 @@
-# Manga OCR & Typeset Tool v14.5.11
+# Manga OCR & Typeset Tool v14.6.3
 
 [![Version](https://img.shields.io/badge/version-14.5.11-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
-## v14.5.11 (Current)
+# v14.6.3 (Current)
 
-- **[MAJOR] Unified multi-engine OCR + AI-enhanced pipeline**
+## [MAJOR] Stability & API reliability fixes
+- Fixed **critical crash** when performing **rotate** or **move text areas** within `SelectableImageLabel`  
+  (caused by unsafe transform redraw and overlapping event handling).
+- Fixed **app crash** when confirming edits in `AdvancedTextEditDialog` under certain undo/redo or preview-update conditions.
+- Improved **OpenRouter API integration**:
+  - Fixed unstable response parsing and retry logic for large translation payloads.
+  - Added `provider_response_validator()` to catch malformed JSON or empty responses.
+  - Implemented stronger **fallback chain** (OpenRouter → DeepL → Local AI) for improved reliability.
 
-  - Both Standard and Enhanced pipelines are implemented in the worker layer:
-    - Standard: preprocessing → OCR → cleanup → translation (DeepL or AI) → post-process/naturalize
-    - Enhanced: Manga-OCR (raw crop) + Tesseract (preprocessed) combined, then AI merge/correction via a selected model
-  - AI translation is exposed via `translate_with_ai(...)` with provider/model, is_enhanced flag and `ocr_results` for improved context.
+## [NEW FEATURE] Text rotation & movement
+- Added full **rotate + move** capability for text areas with interactive transform handles.
+- Real-time preview rendering while rotating or dragging (no more UI freeze).
+- Added **angle snapping** (15° increments) for precise alignment.
+- Updated `SelectableImageLabel` and `TransformManager` for unified transform handling and smoother user experience.
 
-- **[MAJOR] Batch & Queue improvements**
+## [IMPROVEMENT] Editor usability
+- Enhanced `AdvancedTextEditDialog`:
+  - Now preserves cursor position, styling, and preview state after confirming edits.
+  - Reduced lag and visual flicker during redraws.
+- Optimized transform preview system:
+  - Added safe-transform flag to prevent redraw conflicts between UI and worker threads.
+  - Smoother live feedback when dragging or rotating text areas.
 
-  - Dynamic worker queue (`QueueProcessorWorker`) processes jobs in parallel and emits thread-safe signals for UI updates.
-  - `BatchProcessorWorker` supports OpenAI batch endpoints and Gemini-style batched prompts with numbered-snippet parsing.
-  - Rate-limit awareness: workers call `wait_for_api_slot()` which polls `check_and_increment_usage()` and backoffs automatically before retrying.
+---
 
-- **[MAJOR] Robust API management & fallback**
-
-  - Centralized API settings (`APIManagerPanel` / `SettingsCenterDialog`) and `refresh_api_clients()` to hot-reload keys.
-  - Automatic fallback behavior: AI translate failures fall back to non-AI translation (DeepL / configured fallback).
-  - OpenAI batch submission integration (`client.batches.create`) for large-page translation throughput.
-
-- **[IMPROVEMENT] Safety & content hygiene**
-
-  - Safe Mode filtering applied post-translation (configurable) to redact explicit words.
-  - Translation sanitizer strips fences and wrappers, ensuring raw text output for typesetting.
-
-- **[IMPROVEMENT] UX & typesetting features**
-
-  - `AdvancedTextEditDialog` with per-segment rich styling, Bezier curve controls, and bubble rendering options.
-  - `SelectableImageLabel` supports transform (rotate/scale/move), pen/manual polygon selection, pending detection confirmation, and interactive handles.
-  - `BatchSaveWorker` for threaded export of typeset images (draws areas onto `QImage` and saves PNGs without blocking UI).
-
-- **[IMPROVEMENT] Robust engine & dependency handling**
-
-  - Autodetect Tesseract on first-run; centralized `check_dependency()` and `ensure_dependencies()` helpers manage optional engines (Manga-OCR, PaddleOCR, RapidOCR, lama-cleaner, etc.).
-  - `FontManager` handles importing, registering, and listing custom fonts used by the typesetter.
+> 🔧 **Internal Refactor Notes**
+> - Introduced `TransformPreviewState` to safely toggle live preview mode.
+> - Updated `EventRouter` to handle pointer and transform events consistently across multiple selection modes.
+> - Improved thread synchronization between UI and background workers for stable redraw pipeline.
 
 ---
 
@@ -437,3 +432,4 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 ---
 
 Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
+
