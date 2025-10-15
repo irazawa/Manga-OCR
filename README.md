@@ -1,6 +1,6 @@
 # Manga OCR & Typeset Tool v14.6.3
 
-[![Version](https://img.shields.io/badge/version-14.5.11-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-14.6.3-pink)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
 # v14.6.3 (Current)
 
@@ -432,4 +432,5 @@ Kontribusi dipersilakan! Untuk fitur besar, silakan buka issue terlebih dahulu u
 ---
 
 Untuk informasi lebih lanjut, issue, atau kontribusi, silakan kunjungi repository GitHub project ini.
+
 
